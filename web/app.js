@@ -2,6 +2,11 @@ import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 import { LAYOUTS, SIZES, autoLayout, exportPdf } from "./album.js";
 
+// Email links (confirm signup / reset password) land as #access_token=…&type=… or #error=…
+const BOOT_HASH = location.hash;
+const BOOT = Object.fromEntries(new URLSearchParams(BOOT_HASH.replace(/^#\/?/, "").includes("=") ? BOOT_HASH.replace(/^#\/?/, "") : ""));
+let recovering = BOOT.type === "recovery";
+
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const $ = (s, r = document) => r.querySelector(s);
 const app = $("#app");
@@ -14,57 +19,152 @@ function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 2200);
 }
+async function manage(body) {
+  const { data, error } = await sb.functions.invoke("manage", { body });
+  if (error) { let m = error.message; try { m = (await error.context.json()).error || m; } catch {} throw new Error(m); }
+  return data;
+}
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { prompt("Copy this:", text); } }
 const LOGO = `<svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1e1e22"/><circle cx="16" cy="16" r="8" fill="none" stroke="#e8c07a" stroke-width="2.5"/><circle cx="16" cy="16" r="3" fill="#e8c07a"/></svg>`;
+
+const friendly = (error) => {
+  const m = (error?.message || String(error || "")).toLowerCase();
+  if (m.includes("rate limit") || error?.status === 429) return "Too many emails were sent in the last hour. Please wait a bit and try again.";
+  if (m.includes("invalid login")) return "That email and password don't match. If you just signed up, confirm your email first.";
+  if (m.includes("email not confirmed")) return "Please confirm your email first. Check your inbox (and spam).";
+  if (m.includes("already registered")) return "An account with this email already exists. Sign in or reset your password.";
+  if (m.includes("password should")) return "Password must be at least 8 characters.";
+  if (m.includes("expired") || m.includes("invalid")) return "That link has expired or was already used. Request a new one below.";
+  if (m.includes("fetch") || m.includes("network")) return "Can't reach the server. Check your connection and try again.";
+  return error?.message || "Something went wrong. Please try again.";
+};
 
 async function route() {
   teardown.forEach((f) => { try { f(); } catch {} }); teardown = [];
   closeLb();
-  const hash = location.hash.slice(1) || "/";
+  if (recovering) return resetView();
+  if (BOOT.error && !route.shownError) { route.shownError = true; history.replaceState(null, "", location.pathname + "#/"); return authView("in", friendly({ message: BOOT.error_description || BOOT.error }), true); }
+  const hash = location.hash.includes("access_token=") ? "/" : (location.hash.slice(1) || "/");
   const [, a, b, c] = hash.split("/");
   if (a === "p" && b) return proofView(b);
   const { data: { session } } = await sb.auth.getSession();
+  if (location.hash.includes("access_token=")) history.replaceState(null, "", location.pathname + "#/");
   if (!session) return authView();
+  if (BOOT.type === "signup" && !route.welcomed) { route.welcomed = true; toast("Email confirmed. Welcome to Darkroom!"); }
   if (a === "s" && b) return shootView(b, c || "gallery");
   return homeView(session);
 }
 addEventListener("hashchange", route);
-sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_IN" || ev === "SIGNED_OUT") route(); });
+sb.auth.onAuthStateChange((ev) => {
+  if (ev === "PASSWORD_RECOVERY") { recovering = true; route(); }
+  else if ((ev === "SIGNED_IN" && !recovering) || ev === "SIGNED_OUT") route();
+});
 
-function authView() {
-  let mode = "in";
-  app.replaceChildren(h(`<div class="auth"><div class="auth-box">
+const EYE = `<button type="button" class="eye" aria-label="Show password" tabindex="-1">Show</button>`;
+function wireEyes(root) {
+  root.querySelectorAll(".pw").forEach((w) => {
+    const i = w.querySelector("input"), b = w.querySelector(".eye");
+    b.onclick = () => { const show = i.type === "password"; i.type = show ? "text" : "password"; b.textContent = show ? "Hide" : "Show"; };
+  });
+}
+
+function authShell(inner) {
+  return h(`<div class="auth"><div class="auth-box">
     <a class="brand" href="#/">${LOGO} Darkroom</a>
     <h1>Shoot.<br>Watch it develop.</h1>
     <p class="lede">Your Sony sends every frame here as you shoot. Cull, share a proofing link, and design the album in one place.</p>
-    <form id="f">
+    ${inner}</div></div>`);
+}
+
+function authView(mode = "in", notice = "", isError = false) {
+  const titles = { in: "Sign in", up: "Create account", forgot: "Send reset link" };
+  app.replaceChildren(authShell(`
+    <form id="f" novalidate>
+      <div class="form-title" id="ft"></div>
       <input class="input" name="email" type="email" placeholder="Email" autocomplete="email" required>
-      <input class="input" name="pw" type="password" placeholder="Password (8+ characters)" minlength="8" autocomplete="current-password" required>
-      <div class="err" id="err"></div>
-      <button class="btn primary" id="go" type="submit" style="justify-content:center;padding:11px">Sign in</button>
+      <div class="pw" id="pwrow"><input class="input" name="pw" type="password" placeholder="Password (8+ characters)" minlength="8" autocomplete="current-password">${EYE}</div>
+      <div class="row-end" id="forgotRow"><button type="button" class="linkish" id="forgot">Forgot password?</button></div>
+      <div class="msg" id="msg" role="status" aria-live="polite"></div>
+      <button class="btn primary big" id="go" type="submit">Sign in</button>
+      <button class="btn ghost big" id="resend" type="button" hidden>Resend confirmation email</button>
     </form>
-    <div class="switch" id="sw"></div>
-  </div></div>`));
-  const sw = $("#sw"), go = $("#go"), err = $("#err");
+    <div class="switch" id="sw"></div>`));
+  wireEyes(app);
+  const f = $("#f"), go = $("#go"), msg = $("#msg"), sw = $("#sw"), resend = $("#resend");
+  const say = (text, bad = false) => { msg.textContent = text; msg.className = "msg " + (bad ? "bad" : "good"); };
   const paint = () => {
-    go.textContent = mode === "in" ? "Sign in" : "Create account";
-    sw.innerHTML = mode === "in" ? `New here? <button type="button">Create an account</button>` : `Have an account? <button type="button">Sign in</button>`;
-    sw.querySelector("button").onclick = () => { mode = mode === "in" ? "up" : "in"; err.textContent = ""; paint(); };
+    go.textContent = titles[mode];
+    $("#ft").textContent = mode === "forgot" ? "Reset your password" : "";
+    $("#pwrow").hidden = mode === "forgot";
+    $("#forgotRow").hidden = mode !== "in";
+    f.pw.autocomplete = mode === "up" ? "new-password" : "current-password";
+    sw.innerHTML = mode === "in" ? `New here? <button type="button" data-m="up">Create an account</button>`
+      : mode === "up" ? `Have an account? <button type="button" data-m="in">Sign in</button>`
+      : `Remembered it? <button type="button" data-m="in">Back to sign in</button>`;
+    sw.querySelector("button").onclick = (e) => { mode = e.target.dataset.m; msg.textContent = ""; resend.hidden = true; paint(); };
   };
+  $("#forgot").onclick = () => { mode = "forgot"; msg.textContent = ""; paint(); f.email.focus(); };
+  if (notice) say(notice, isError);
   paint();
-  $("#f").onsubmit = async (e) => {
-    e.preventDefault(); err.textContent = ""; err.style.color = ""; go.disabled = true;
-    const email = e.target.email.value.trim(), password = e.target.pw.value;
-    const { data, error } = mode === "in"
-      ? await sb.auth.signInWithPassword({ email, password })
-      : await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin } });
-    go.disabled = false;
-    if (error) { err.textContent = error.message; return; }
-    if (mode === "up" && !data.session) {
-      err.style.color = "var(--good)";
-      err.textContent = "Check your email to confirm, then come back and sign in.";
-      mode = "in"; paint();
+  const redirectTo = `${location.origin}/`;
+  resend.onclick = async () => {
+    resend.disabled = true;
+    const { error } = await sb.auth.resend({ type: "signup", email: f.email.value.trim(), options: { emailRedirectTo: redirectTo } });
+    resend.disabled = false;
+    error ? say(friendly(error), true) : say("Sent. Check your inbox (and spam) for the confirmation link.");
+  };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const email = f.email.value.trim(), password = f.pw.value;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return say("Enter a valid email address.", true);
+    if (mode !== "forgot" && password.length < 8) return say("Password must be at least 8 characters.", true);
+    go.disabled = true; const label = go.textContent; go.textContent = "One moment…";
+    let error, data;
+    if (mode === "in") ({ data, error } = await sb.auth.signInWithPassword({ email, password }));
+    else if (mode === "up") ({ data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo } }));
+    else ({ error } = await sb.auth.resetPasswordForEmail(email, { redirectTo }));
+    go.disabled = false; go.textContent = label;
+    if (error) {
+      say(friendly(error), true);
+      resend.hidden = !/confirm/i.test(error.message || "");
+      return;
     }
+    if (mode === "forgot") { say(`If an account exists for ${email}, a reset link is on its way. Check your inbox (and spam).`); return; }
+    if (mode === "up") {
+      if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        say("An account with this email already exists. Sign in, or use Forgot password.", true); mode = "in"; paint(); return;
+      }
+      if (!data.session) { say(`Almost done. We sent a confirmation link to ${email}. Open it, then sign in here.`); mode = "in"; paint(); resend.hidden = false; }
+    }
+  };
+}
+
+function resetView() {
+  app.replaceChildren(authShell(`
+    <form id="f" novalidate>
+      <div class="form-title">Choose a new password</div>
+      <div class="pw"><input class="input" name="pw" type="password" placeholder="New password (8+ characters)" autocomplete="new-password">${EYE}</div>
+      <div class="pw"><input class="input" name="pw2" type="password" placeholder="Repeat new password" autocomplete="new-password">${EYE}</div>
+      <div class="msg" id="msg" role="status" aria-live="polite"></div>
+      <button class="btn primary big" id="go" type="submit">Save new password</button>
+    </form>`));
+  wireEyes(app);
+  const f = $("#f"), msg = $("#msg"), go = $("#go");
+  const say = (t, bad) => { msg.textContent = t; msg.className = "msg " + (bad ? "bad" : "good"); };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    if (f.pw.value.length < 8) return say("Password must be at least 8 characters.", true);
+    if (f.pw.value !== f.pw2.value) return say("The two passwords don't match.", true);
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) { recovering = false; history.replaceState(null, "", location.pathname + "#/"); return authView("forgot", "That reset link has expired. Request a new one.", true); }
+    go.disabled = true;
+    const { error } = await sb.auth.updateUser({ password: f.pw.value });
+    go.disabled = false;
+    if (error) return say(friendly(error), true);
+    recovering = false;
+    history.replaceState(null, "", location.pathname + "#/");
+    toast("Password updated. You're signed in.");
+    route();
   };
 }
 
@@ -140,6 +240,7 @@ async function shootView(id, tab) {
   onLeave(() => sb.removeChannel(ch));
 
   const body = $("#body");
+  state.rerender = (w) => rerender(w);
   if (tab === "gallery") rerender = galleryTab(body, state);
   else if (tab === "album") rerender = albumTab(body, state);
   else if (tab === "share") rerender = shareTab(body, state);
@@ -193,8 +294,21 @@ function ownerLb(state) {
   return {
     get: (id) => state.photos.get(id),
     comments: (id) => state.comments.filter((c) => c.photo_id === id),
-    head: (p) => `<button class="btn small" data-act="star">${p.star ? "★ Starred" : "☆ Star"}</button>${p.pick ? '<span class="tag p">♥ Client pick</span>' : ""}`,
-    act: (p, act) => act === "star" && state.toggleStar(p),
+    head: (p) => `<button class="btn small" data-act="star">${p.star ? "★ Starred" : "☆ Star"}</button>${p.pick ? '<span class="tag p">♥ Client pick</span>' : ""}<button class="btn small ghost danger" data-act="del" title="Delete photo">Delete</button>`,
+    act: async (p, act) => {
+      if (act === "star") return state.toggleStar(p);
+      if (act === "del") {
+        if (!confirm(`Delete ${p.name}? This removes it from the gallery, album and client link. The original stays on your computer.`)) return;
+        try {
+          const next = LB && (LB.ids[LB.ids.indexOf(p.id) + 1] ?? LB.ids[LB.ids.indexOf(p.id) - 1]);
+          await manage({ action: "delete_photo", photo_id: p.id });
+          state.photos.delete(p.id);
+          if (LB) { LB.ids = LB.ids.filter((x) => x !== p.id); LB.id = next; }
+          const sp = state.shoot.album?.spreads || []; sp.forEach((x) => (x.slots = x.slots.map((id) => (id === p.id ? null : id))));
+          state.rerender?.(); lbRefresh(); toast("Photo deleted");
+        } catch (e) { toast("Couldn't delete: " + e.message); }
+      }
+    },
     send: async (p, text) => {
       const { data, error } = await sb.from("comments").insert({ shoot_id: state.shoot.id, photo_id: p.id, author: "Photographer", body: text, from_owner: true }).select().single();
       if (error) return toast(error.message);
@@ -284,7 +398,18 @@ function bridgeTab(body, state) {
         <li><b>FTP Function: On</b> · <b>Auto FTP Transfer: On</b> · Transfer Target: <b>JPEG</b></li>
         <li>Shoot. Photos develop in the <a href="#/s/${s.id}/gallery">Gallery</a> within seconds.</li>
       </ol></div>
+    <div class="card danger-card"><div class="label">Danger zone</div><h3 style="margin:4px 0 6px;font-family:var(--serif);font-weight:500">Delete this shoot</h3>
+      <p class="muted">Removes every photo, comment, the album and the client link from Darkroom. Originals on your computer are not touched.</p>
+      <button class="btn danger" id="delShoot">Delete shoot…</button></div>
   </div></main>`));
+  $("#delShoot").onclick = async (e) => {
+    const typed = prompt(`Type the shoot name to confirm deleting it:\n${s.title}`);
+    if (typed === null) return;
+    if (typed.trim() !== s.title.trim()) return toast("Name didn't match. Nothing was deleted.");
+    e.target.disabled = true; e.target.textContent = "Deleting…";
+    try { await manage({ action: "delete_shoot", shoot_id: s.id }); toast("Shoot deleted"); location.hash = "#/"; }
+    catch (err) { toast("Couldn't delete: " + err.message); e.target.disabled = false; e.target.textContent = "Delete shoot…"; }
+  };
   $("#cpc").onclick = () => copy(cmd);
   $("#cpk").onclick = () => copy(s.ingest_key);
   return () => {};
@@ -383,7 +508,7 @@ async function proofView(token) {
   };
   try { data = await load(); } catch (e) { data = null; }
   if (!data) { app.replaceChildren(h(`<div class="empty"><h2>This gallery isn't available</h2><p>The link may be off or mistyped. Ask your photographer for a fresh one.</p></div>`)); return; }
-  let name = localStorage.getItem("darkroom:name") || "";
+  let name = ""; try { name = localStorage.getItem("darkroom:name") || ""; } catch {}
   const photos = new Map(data.photos.map((p) => [p.id, p]));
   let comments = data.comments;
   app.replaceChildren(h(`<div>
@@ -415,7 +540,7 @@ async function proofView(token) {
     head: (p) => `<button class="btn small" data-act="pick">${p.pick ? "♥ Favorited" : "♡ Favorite"}</button>`,
     act: (p, a) => a === "pick" && pick(p),
     send: async (p, text) => {
-      if (!name) { name = (prompt("Your name (so your photographer knows who commented)") || "").trim(); if (name) localStorage.setItem("darkroom:name", name); }
+      if (!name) { name = (prompt("Your name (so your photographer knows who commented)") || "").trim(); if (name) try { localStorage.setItem("darkroom:name", name); } catch {} }
       const { data: id, error } = await sb.rpc("share_comment", { p_token: token, p_photo: p.id, p_author: name || "Client", p_body: text });
       if (error) return toast("Couldn't send, try again");
       comments.push({ id, photo_id: p.id, author: name || "Client", body: text, from_owner: false });
