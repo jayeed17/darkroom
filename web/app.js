@@ -3,7 +3,6 @@ import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 import { LAYOUTS, SIZES, autoLayout, exportPdf } from "./album.js";
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
-const INGEST_URL = `${SUPABASE_URL}/functions/v1/ingest`;
 const $ = (s, r = document) => r.querySelector(s);
 const app = $("#app");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -18,7 +17,6 @@ function toast(msg) {
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { prompt("Copy this:", text); } }
 const LOGO = `<svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1e1e22"/><circle cx="16" cy="16" r="8" fill="none" stroke="#e8c07a" stroke-width="2.5"/><circle cx="16" cy="16" r="3" fill="#e8c07a"/></svg>`;
 
-// ---------------------------------------------------------------- router
 async function route() {
   teardown.forEach((f) => { try { f(); } catch {} }); teardown = [];
   closeLb();
@@ -33,7 +31,6 @@ async function route() {
 addEventListener("hashchange", route);
 sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_IN" || ev === "SIGNED_OUT") route(); });
 
-// ---------------------------------------------------------------- auth
 function authView() {
   let mode = "in";
   app.replaceChildren(h(`<div class="auth"><div class="auth-box">
@@ -56,7 +53,7 @@ function authView() {
   };
   paint();
   $("#f").onsubmit = async (e) => {
-    e.preventDefault(); err.textContent = ""; go.disabled = true;
+    e.preventDefault(); err.textContent = ""; err.style.color = ""; go.disabled = true;
     const email = e.target.email.value.trim(), password = e.target.pw.value;
     const { data, error } = mode === "in"
       ? await sb.auth.signInWithPassword({ email, password })
@@ -71,7 +68,6 @@ function authView() {
   };
 }
 
-// ---------------------------------------------------------------- home
 async function homeView(session) {
   app.replaceChildren(h(`<div>
     <header class="top"><a class="brand" href="#/">${LOGO} Darkroom</a><span class="sp"></span>
@@ -103,7 +99,6 @@ async function homeView(session) {
     <div class="meta"><h3>${esc(s.title)}</h3><div class="muted" style="font-size:12.5px">${new Date(s.created_at).toLocaleDateString()} · ${counts[s.id] || 0} photos</div></div></a>`)));
 }
 
-// ---------------------------------------------------------------- shoot
 async function shootView(id, tab) {
   const { data: shoot, error } = await sb.from("shoots").select("*").eq("id", id).maybeSingle();
   if (error || !shoot) { app.replaceChildren(h(`<div class="empty"><h2>Shoot not found</h2><p><a href="#/">Back to shoots</a></p></div>`)); return; }
@@ -151,7 +146,6 @@ async function shootView(id, tab) {
   else rerender = bridgeTab(body, state);
 }
 
-// ---------- gallery
 function galleryTab(body, state) {
   let filter = "all";
   body.replaceChildren(h(`<main><div class="bar">
@@ -192,7 +186,7 @@ function galleryTab(body, state) {
     $("#flt").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); render();
   };
   render();
-  return (what) => { render(); if (what === "comments" || what === "photos") lbRefresh(); };
+  return () => { render(); lbRefresh(); };
 }
 
 function ownerLb(state) {
@@ -202,15 +196,15 @@ function ownerLb(state) {
     head: (p) => `<button class="btn small" data-act="star">${p.star ? "★ Starred" : "☆ Star"}</button>${p.pick ? '<span class="tag p">♥ Client pick</span>' : ""}`,
     act: (p, act) => act === "star" && state.toggleStar(p),
     send: async (p, text) => {
-      const { error } = await sb.from("comments").insert({ shoot_id: state.shoot.id, photo_id: p.id, author: "Photographer", body: text, from_owner: true });
-      if (error) toast(error.message);
+      const { data, error } = await sb.from("comments").insert({ shoot_id: state.shoot.id, photo_id: p.id, author: "Photographer", body: text, from_owner: true }).select().single();
+      if (error) return toast(error.message);
+      if (!state.comments.some((c) => c.id === data.id)) state.comments.push(data);
     },
     info: (p) => `${esc(p.name)} · ${esc(p.camera || "")} · sharpness ${Math.round(p.sharpness || 0)}${p.blurry ? " · blurry" : ""}${p.dup_of ? " · duplicate" : ""}`,
     keys: { s: "star" },
   };
 }
 
-// ---------- lightbox (shared by owner + client)
 let LB = null;
 function openLb(ids, id, api) { LB = { ids, id, api }; $("#lb").hidden = false; lbRefresh(); }
 function closeLb() { LB = null; const lb = $("#lb"); if (lb) { lb.hidden = true; lb.innerHTML = ""; } }
@@ -245,7 +239,6 @@ addEventListener("keydown", (e) => {
   else if (LB.api.keys[e.key.toLowerCase()]) { LB.api.act(LB.api.get(LB.id), LB.api.keys[e.key.toLowerCase()]); setTimeout(lbRefresh, 30); }
 });
 
-// ---------- share
 function shareTab(body, state) {
   const s = state.shoot;
   const url = `${location.origin}/#/p/${s.share_token}`;
@@ -275,7 +268,6 @@ function shareTab(body, state) {
   return paint;
 }
 
-// ---------- camera bridge
 function bridgeTab(body, state) {
   const s = state.shoot;
   const cmd = `cd darkroom/bridge && ./start.sh ${s.ingest_key}`;
@@ -298,7 +290,6 @@ function bridgeTab(body, state) {
   return () => {};
 }
 
-// ---------- album
 function albumTab(body, state) {
   const s = state.shoot;
   const album = s.album && Array.isArray(s.album.spreads) ? s.album : { size: "12x12", spreads: [] };
@@ -383,7 +374,6 @@ function albumTab(body, state) {
   return (what) => { if (what === "photos") render(); };
 }
 
-// ---------------------------------------------------------------- client proofing (no login)
 async function proofView(token) {
   app.replaceChildren(h(`<div class="boot">Developing…</div>`));
   let data;
@@ -438,7 +428,7 @@ async function proofView(token) {
     $("#flt").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); render();
   };
   render();
-  const iv = setInterval(async () => { // pick up photographer replies
+  const iv = setInterval(async () => {
     try { const d = await load(); if (d) { comments = d.comments; lbRefresh(); } } catch {}
   }, 20000);
   onLeave(() => clearInterval(iv));
