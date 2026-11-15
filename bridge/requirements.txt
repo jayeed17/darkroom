@@ -1,0 +1,5 @@
+pyftpdlib>=1.5.9
+pillow>=10.0
+numpy>=1.26
+rawpy>=0.21
+pillow-heif>=0.16
