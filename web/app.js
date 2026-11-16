@@ -63,7 +63,12 @@ async function loadProfile(user) {
 }
 const firstName = (p) => (p?.full_name || "").trim().split(/\s+/)[0] || "";
 
+// every route() bumps this; async views bail out if a newer route started while they awaited
+let ROUTE = 0;
+const stale = (g) => g !== ROUTE;
+
 async function route() {
+  const gen = ++ROUTE;
   teardown.forEach((f) => { try { f(); } catch {} }); teardown = [];
   closeLb(); closeShow();
   if (recovering) return resetView();
@@ -72,6 +77,7 @@ async function route() {
   const [, a, b, c] = hash.split("/");
   if (a === "p" && b) return proofView(b);
   const { data: { session } } = await sb.auth.getSession();
+  if (stale(gen)) return;
   if (location.hash.includes("access_token=")) history.replaceState(null, "", location.pathname + "#/");
   if (!session) { PROFILE = null; return authView(); }
   if (BOOT.type === "signup" && !route.welcomed) { route.welcomed = true; toast("Email confirmed. Welcome to Darkroom!"); }
@@ -85,7 +91,7 @@ let AUTH_UID;
 sb.auth.onAuthStateChange((ev, session) => {
   const uid = session?.user?.id || null;
   if (ev === "PASSWORD_RECOVERY") { recovering = true; AUTH_UID = uid; route(); return; }
-  if (ev === "INITIAL_SESSION") { AUTH_UID = uid; return; }
+  if (ev === "INITIAL_SESSION" || AUTH_UID === undefined) { AUTH_UID = uid; return; }
   if (uid === AUTH_UID) return;
   AUTH_UID = uid;
   if ((ev === "SIGNED_IN" && !recovering) || ev === "SIGNED_OUT") route();
@@ -216,10 +222,14 @@ function resetView() {
   };
 }
 
+const FIRST_VISIT = {};
 async function homeView(session) {
+  const gen = ROUTE;
   const profile = await loadProfile(session.user);
+  if (stale(gen)) return;
   const first = firstName(profile);
-  const returning = lget("darkroom:seen:" + session.user.id);
+  FIRST_VISIT[session.user.id] ??= !lget("darkroom:seen:" + session.user.id);
+  const returning = !FIRST_VISIT[session.user.id];
   lset("darkroom:seen:" + session.user.id, "1");
   app.replaceChildren(h(`<div>
     <header class="top"><a class="brand" href="#/">${LOGO} Darkroom</a><span class="sp"></span>
@@ -259,6 +269,7 @@ async function homeView(session) {
     sb.from("shoots").select("id,title,created_at,shoot_date,cover_photo").order("created_at", { ascending: false }),
     sb.from("photos").select("id,shoot_id,thumb_url,star,blurry").order("created_at", { ascending: false }).limit(400),
   ]);
+  if (stale(gen)) return;
   const heroArt = $(".hero-art");
   if (!heroArt) return;
   const art = prints3d((recent || []).filter((p) => !p.blurry).slice(0, 12).map((p) => p.thumb_url), { count: 12 });
@@ -287,7 +298,9 @@ async function newShoot() {
 }
 
 async function shootView(id, tab) {
+  const gen = ROUTE;
   const { data: shoot, error } = await sb.from("shoots").select("*").eq("id", id).maybeSingle();
+  if (stale(gen)) return;
   if (error || !shoot) { app.replaceChildren(h(`<div class="empty"><h2>Shoot not found</h2><p><a href="#/">Back to shoots</a></p></div>`)); return; }
   const tabs = [["gallery", "Gallery"], ["album", "Album"], ["share", "Client proofing"], ["bridge", "Camera"]];
   app.replaceChildren(h(`<div>
@@ -305,6 +318,7 @@ async function shootView(id, tab) {
     sb.from("photos").select("*").eq("shoot_id", id),
     sb.from("comments").select("*").eq("shoot_id", id).order("created_at"),
   ]);
+  if (stale(gen)) return;
   (photos || []).forEach((p) => state.photos.set(p.id, p));
   state.comments = comments || [];
 
@@ -749,7 +763,9 @@ async function proofView(token, wrongPw) {
     return d;
   };
   let data;
+  const gen = ROUTE;
   try { data = await load(); } catch { data = null; }
+  if (stale(gen)) return;
   if (data?.needPassword) {
     app.replaceChildren(h(`<div class="auth gate"><div class="auth-box">
       <span class="brand">${LOGO} Darkroom</span>
