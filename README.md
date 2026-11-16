@@ -8,7 +8,8 @@ Darkroom is a minimal, open-source alternative to tools like Zno and Pixieset fo
 |---|---|
 | **Live ingest** | Sony FX3 / a7 IV / a7R V push each shot over Wi-Fi FTP to the bridge on your laptop, which develops it into the cloud gallery within seconds. |
 | **Smart cull** | Exposure-independent blur detection (dark-but-sharp frames aren't flagged) and near-duplicate detection. Star your keepers. |
-| **Client proofing** | One link, no client accounts. Clients ♥ favorites and comment; you see it live and reply. |
+| **Client proofing** | One link, no client accounts. Cinematic cover photo, ♥ favorites, comments, "Send my selection". Optional gallery password, expiry date, watermark and downloads. |
+| **Studio touches** | 3D welcome with a new photography quote every visit, personal greeting, "Just developed" arrival cards, slideshow, copy picks straight into a Lightroom filename filter. |
 | **Album designer** | Layflat spreads (12×12, 10×10, 8×8, 11×8.5), seven layouts, story-order auto-layout, drag-and-drop. |
 | **Print PDF** | One PDF per album, spread-sized pages, ready for any lab. |
 

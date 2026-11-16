@@ -1,6 +1,7 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 import { LAYOUTS, SIZES, autoLayout, exportPdf } from "./album.js";
+import { pickQuote, prints3d, quoteEl, greeting } from "./welcome.js";
 
 // Email links (confirm signup / reset password) land as #access_token=…&type=… or #error=…
 const BOOT_HASH = location.hash;
@@ -14,17 +15,29 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const h = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 let teardown = [];
 const onLeave = (fn) => teardown.push(fn);
+const sget = (k) => { try { return sessionStorage.getItem(k); } catch { return null; } };
+const sset = (k, v) => { try { sessionStorage.setItem(k, v); } catch {} };
+const lget = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lset = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+const fmtDate = (d) => d ? new Date(d + (String(d).length === 10 ? "T12:00:00" : "")).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
 
 function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.hidden = false;
-  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 2200);
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 2400);
 }
 async function manage(body) {
   const { data, error } = await sb.functions.invoke("manage", { body });
   if (error) { let m = error.message; try { m = (await error.context.json()).error || m; } catch {} throw new Error(m); }
   return data;
 }
-async function copy(text) { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { prompt("Copy this:", text); } }
+async function copy(text, msg = "Copied") { try { await navigator.clipboard.writeText(text); toast(msg); } catch { prompt("Copy this:", text); } }
+async function download(url, name) {
+  try {
+    const blob = await (await fetch(url, { mode: "cors" })).blob();
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  } catch { window.open(url, "_blank", "noopener"); }
+}
 const LOGO = `<svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1e1e22"/><circle cx="16" cy="16" r="8" fill="none" stroke="#e8c07a" stroke-width="2.5"/><circle cx="16" cy="16" r="3" fill="#e8c07a"/></svg>`;
 
 const friendly = (error) => {
@@ -39,9 +52,20 @@ const friendly = (error) => {
   return error?.message || "Something went wrong. Please try again.";
 };
 
+// profile cache (name + phone)
+let PROFILE = null;
+async function loadProfile(user) {
+  if (PROFILE && PROFILE.id === user.id) return PROFILE;
+  const { data } = await sb.from("profiles").select("id,full_name,phone").eq("id", user.id).maybeSingle();
+  PROFILE = data || { id: user.id, full_name: null, phone: null };
+  if (!PROFILE.full_name && user.user_metadata?.full_name) PROFILE.full_name = user.user_metadata.full_name;
+  return PROFILE;
+}
+const firstName = (p) => (p?.full_name || "").trim().split(/\s+/)[0] || "";
+
 async function route() {
   teardown.forEach((f) => { try { f(); } catch {} }); teardown = [];
-  closeLb();
+  closeLb(); closeShow();
   if (recovering) return resetView();
   if (BOOT.error && !route.shownError) { route.shownError = true; history.replaceState(null, "", location.pathname + "#/"); return authView("in", friendly({ message: BOOT.error_description || BOOT.error }), true); }
   const hash = location.hash.includes("access_token=") ? "/" : (location.hash.slice(1) || "/");
@@ -49,15 +73,22 @@ async function route() {
   if (a === "p" && b) return proofView(b);
   const { data: { session } } = await sb.auth.getSession();
   if (location.hash.includes("access_token=")) history.replaceState(null, "", location.pathname + "#/");
-  if (!session) return authView();
+  if (!session) { PROFILE = null; return authView(); }
   if (BOOT.type === "signup" && !route.welcomed) { route.welcomed = true; toast("Email confirmed. Welcome to Darkroom!"); }
   if (a === "s" && b) return shootView(b, c || "gallery");
   return homeView(session);
 }
 addEventListener("hashchange", route);
-sb.auth.onAuthStateChange((ev) => {
-  if (ev === "PASSWORD_RECOVERY") { recovering = true; route(); }
-  else if ((ev === "SIGNED_IN" && !recovering) || ev === "SIGNED_OUT") route();
+// re-route only when the signed-in user actually changes. Supabase re-fires SIGNED_IN on tab focus and
+// token refresh; re-routing then would rebuild the page mid-shoot (flicker, closed lightbox, dropped live feed).
+let AUTH_UID;
+sb.auth.onAuthStateChange((ev, session) => {
+  const uid = session?.user?.id || null;
+  if (ev === "PASSWORD_RECOVERY") { recovering = true; AUTH_UID = uid; route(); return; }
+  if (ev === "INITIAL_SESSION") { AUTH_UID = uid; return; }
+  if (uid === AUTH_UID) return;
+  AUTH_UID = uid;
+  if ((ev === "SIGNED_IN" && !recovering) || ev === "SIGNED_OUT") route();
 });
 
 const EYE = `<button type="button" class="eye" aria-label="Show password" tabindex="-1">Show</button>`;
@@ -69,11 +100,18 @@ function wireEyes(root) {
 }
 
 function authShell(inner) {
-  return h(`<div class="auth"><div class="auth-box">
-    <a class="brand" href="#/">${LOGO} Darkroom</a>
-    <h1>Shoot.<br>Watch it develop.</h1>
-    <p class="lede">Your Sony sends every frame here as you shoot. Cull, share a proofing link, and design the album in one place.</p>
-    ${inner}</div></div>`);
+  const el = h(`<div class="auth">
+    <div class="auth-art"><div class="art-slot"></div><div class="quote-slot"></div></div>
+    <div class="auth-box">
+      <a class="brand" href="#/">${LOGO} Darkroom</a>
+      <h1>Shoot.<br>Watch it develop.</h1>
+      <p class="lede">Your Sony sends every frame here as you shoot. Cull, share a proofing link, and design the album in one place.</p>
+      ${inner}</div></div>`);
+  const stage = prints3d([], { count: 12 });
+  el.querySelector(".art-slot").append(stage);
+  el.querySelector(".quote-slot").append(quoteEl(pickQuote()));
+  onLeave(() => stage._cleanup());
+  return el;
 }
 
 function authView(mode = "in", notice = "", isError = false) {
@@ -81,6 +119,10 @@ function authView(mode = "in", notice = "", isError = false) {
   app.replaceChildren(authShell(`
     <form id="f" novalidate>
       <div class="form-title" id="ft"></div>
+      <div class="up-only" id="upFields">
+        <input class="input" name="name" type="text" placeholder="Full name" autocomplete="name" maxlength="120">
+        <input class="input" name="phone" type="tel" placeholder="Phone number" autocomplete="tel" maxlength="40">
+      </div>
       <input class="input" name="email" type="email" placeholder="Email" autocomplete="email" required>
       <div class="pw" id="pwrow"><input class="input" name="pw" type="password" placeholder="Password (8+ characters)" minlength="8" autocomplete="current-password">${EYE}</div>
       <div class="row-end" id="forgotRow"><button type="button" class="linkish" id="forgot">Forgot password?</button></div>
@@ -94,7 +136,8 @@ function authView(mode = "in", notice = "", isError = false) {
   const say = (text, bad = false) => { msg.textContent = text; msg.className = "msg " + (bad ? "bad" : "good"); };
   const paint = () => {
     go.textContent = titles[mode];
-    $("#ft").textContent = mode === "forgot" ? "Reset your password" : "";
+    $("#ft").textContent = mode === "forgot" ? "Reset your password" : mode === "up" ? "Create your account" : "";
+    $("#upFields").hidden = mode !== "up";
     $("#pwrow").hidden = mode === "forgot";
     $("#forgotRow").hidden = mode !== "in";
     f.pw.autocomplete = mode === "up" ? "new-password" : "current-password";
@@ -116,12 +159,17 @@ function authView(mode = "in", notice = "", isError = false) {
   f.onsubmit = async (e) => {
     e.preventDefault();
     const email = f.email.value.trim(), password = f.pw.value;
+    const name = f.name.value.trim().replace(/\s+/g, " "), phone = f.phone.value.trim();
+    if (mode === "up") {
+      if (name.length < 2) return say("Please enter your full name.", true);
+      if (!/^\+?[\d\s().-]{7,20}$/.test(phone)) return say("Please enter a valid phone number.", true);
+    }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return say("Enter a valid email address.", true);
     if (mode !== "forgot" && password.length < 8) return say("Password must be at least 8 characters.", true);
     go.disabled = true; const label = go.textContent; go.textContent = "One moment…";
     let error, data;
     if (mode === "in") ({ data, error } = await sb.auth.signInWithPassword({ email, password }));
-    else if (mode === "up") ({ data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo } }));
+    else if (mode === "up") ({ data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo, data: { full_name: name, phone } } }));
     else ({ error } = await sb.auth.resetPasswordForEmail(email, { redirectTo }));
     go.disabled = false; go.textContent = label;
     if (error) {
@@ -134,7 +182,7 @@ function authView(mode = "in", notice = "", isError = false) {
       if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
         say("An account with this email already exists. Sign in, or use Forgot password.", true); mode = "in"; paint(); return;
       }
-      if (!data.session) { say(`Almost done. We sent a confirmation link to ${email}. Open it, then sign in here.`); mode = "in"; paint(); resend.hidden = false; }
+      if (!data.session) { say(`Almost done, ${name.split(" ")[0]}. We sent a confirmation link to ${email}. Open it, then sign in here.`); mode = "in"; paint(); resend.hidden = false; }
     }
   };
 }
@@ -169,34 +217,73 @@ function resetView() {
 }
 
 async function homeView(session) {
+  const profile = await loadProfile(session.user);
+  const first = firstName(profile);
+  const returning = lget("darkroom:seen:" + session.user.id);
+  lset("darkroom:seen:" + session.user.id, "1");
   app.replaceChildren(h(`<div>
     <header class="top"><a class="brand" href="#/">${LOGO} Darkroom</a><span class="sp"></span>
-      <span class="crumb">${esc(session.user.email)}</span><button class="btn ghost small" id="out">Sign out</button></header>
+      <span class="crumb" id="who">${esc(profile.full_name || session.user.email)}</span><button class="btn ghost small" id="out">Sign out</button></header>
+    <section class="hero">
+      <div class="hero-text">
+        <div class="label">${esc(greeting())}</div>
+        <h1 class="hero-h">${returning ? "Welcome back" : "Welcome"}${first ? `, <em>${esc(first)}</em>` : ""}.</h1>
+        <div class="quote-slot"></div>
+        <div class="kv" style="margin-top:22px"><button class="btn primary" id="new">+ New shoot</button></div>
+        <form class="card name-card" id="nameCard" hidden>
+          <div class="label">Finish your profile</div>
+          <p class="muted" style="margin:6px 0 10px">Add your name so clients see who they're working with.</p>
+          <div class="kv"><input class="input" name="name" placeholder="Full name" maxlength="120" value="${esc(profile.full_name || "")}"><input class="input" name="phone" type="tel" placeholder="Phone" maxlength="40" value="${esc(profile.phone || "")}"><button class="btn primary">Save</button></div>
+        </form>
+      </div>
+      <div class="hero-art"></div>
+    </section>
     <main><div class="wrap">
-      <div class="bar"><div><div class="label">Your shoots</div><h1 class="h1">Shoots</h1></div><span class="sp"></span>
-        <button class="btn primary" id="new">+ New shoot</button></div>
+      <div class="bar"><div><div class="label">Your shoots</div><h2 class="h1">Shoots</h2></div></div>
       <div class="shoots" id="list"><div class="muted">Loading…</div></div>
     </div></main></div>`));
+  $(".quote-slot").append(quoteEl(pickQuote()));
   $("#out").onclick = () => sb.auth.signOut();
-  $("#new").onclick = async () => {
-    const title = prompt("Shoot name", "Untitled shoot"); if (title === null) return;
-    const { data, error } = await sb.from("shoots").insert({ title: title.trim() || "Untitled shoot" }).select("id").single();
+  $("#new").onclick = newShoot;
+  const nc = $("#nameCard");
+  nc.hidden = !!profile.full_name;
+  nc.onsubmit = async (e) => {
+    e.preventDefault();
+    const full_name = nc.name.value.trim().replace(/\s+/g, " "), phone = nc.phone.value.trim();
+    if (full_name.length < 2) return toast("Please enter your full name");
+    const { error } = await sb.from("profiles").upsert({ id: session.user.id, full_name, phone: phone || null });
     if (error) return toast(error.message);
-    location.hash = `#/s/${data.id}/bridge`;
+    PROFILE = { ...profile, full_name, phone }; toast("Saved"); route();
   };
-  const { data: shoots, error } = await sb.from("shoots").select("id,title,created_at").order("created_at", { ascending: false });
+  const [{ data: shoots, error }, { data: recent }] = await Promise.all([
+    sb.from("shoots").select("id,title,created_at,shoot_date,cover_photo").order("created_at", { ascending: false }),
+    sb.from("photos").select("id,shoot_id,thumb_url,star,blurry").order("created_at", { ascending: false }).limit(400),
+  ]);
+  const heroArt = $(".hero-art");
+  if (!heroArt) return;
+  const art = prints3d((recent || []).filter((p) => !p.blurry).slice(0, 12).map((p) => p.thumb_url), { count: 12 });
+  heroArt.append(art); onLeave(() => art._cleanup());
   const list = $("#list");
   if (error) { list.innerHTML = `<div class="err">${esc(error.message)}</div>`; return; }
   if (!shoots.length) {
     list.replaceWith(h(`<div class="empty"><h2>No shoots yet</h2><p>Create a shoot, connect your camera, and photos appear here as you take them.</p></div>`));
     return;
   }
-  const { data: covers } = await sb.from("photos").select("shoot_id,thumb_url,star").in("shoot_id", shoots.map((s) => s.id)).order("star", { ascending: false }).limit(1000);
+  const byId = new Map((recent || []).map((p) => [p.id, p]));
   const cover = {}, counts = {};
-  (covers || []).forEach((p) => { cover[p.shoot_id] ??= p.thumb_url; counts[p.shoot_id] = (counts[p.shoot_id] || 0) + 1; });
+  (recent || []).forEach((p) => { counts[p.shoot_id] = (counts[p.shoot_id] || 0) + 1; if (p.star) cover[p.shoot_id] ??= p.thumb_url; });
+  (recent || []).forEach((p) => { cover[p.shoot_id] ??= p.thumb_url; });
+  shoots.forEach((s) => { if (s.cover_photo && byId.get(s.cover_photo)) cover[s.id] = byId.get(s.cover_photo).thumb_url; });
   list.replaceChildren(...shoots.map((s) => h(`<a class="shoot" href="#/s/${s.id}">
     <div class="cover" style="${cover[s.id] ? `background-image:url('${esc(cover[s.id])}')` : ""}">${cover[s.id] ? "" : "Waiting for photos"}</div>
-    <div class="meta"><h3>${esc(s.title)}</h3><div class="muted" style="font-size:12.5px">${new Date(s.created_at).toLocaleDateString()} · ${counts[s.id] || 0} photos</div></div></a>`)));
+    <div class="meta"><h3>${esc(s.title)}</h3><div class="muted" style="font-size:12.5px">${s.shoot_date ? fmtDate(s.shoot_date) : new Date(s.created_at).toLocaleDateString()}${counts[s.id] ? ` · ${counts[s.id]}${counts[s.id] >= 400 ? "+" : ""} photos` : ""}</div></div></a>`)));
+}
+
+async function newShoot() {
+  const title = prompt("Shoot name", "Untitled shoot"); if (title === null) return;
+  const { data, error } = await sb.from("shoots").insert({ title: title.trim() || "Untitled shoot", shoot_date: new Date().toISOString().slice(0, 10) }).select("id").single();
+  if (error) return toast(error.message);
+  location.hash = `#/s/${data.id}/bridge`;
 }
 
 async function shootView(id, tab) {
@@ -211,7 +298,7 @@ async function shootView(id, tab) {
     <div id="body"></div></div>`));
   $("#title").onchange = async (e) => {
     const t = e.target.value.trim() || "Untitled shoot";
-    await sb.from("shoots").update({ title: t }).eq("id", id); toast("Renamed");
+    await sb.from("shoots").update({ title: t }).eq("id", id); shoot.title = t; toast("Renamed");
   };
   const state = { shoot, photos: new Map(), comments: [] };
   const [{ data: photos }, { data: comments }] = await Promise.all([
@@ -225,12 +312,19 @@ async function shootView(id, tab) {
   const ch = sb.channel(`shoot-${id}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "photos", filter: `shoot_id=eq.${id}` }, (pl) => {
       if (pl.eventType === "DELETE") state.photos.delete(pl.old.id);
-      else { const isNew = !state.photos.has(pl.new.id); state.photos.set(pl.new.id, pl.new); if (isNew) state.fresh = pl.new.id; }
+      else {
+        const isNew = !state.photos.has(pl.new.id);
+        state.photos.set(pl.new.id, pl.new);
+        if (isNew) { (state.fresh ||= new Set()).add(pl.new.id); arrival(pl.new); }
+      }
       rerender("photos");
     })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "comments", filter: `shoot_id=eq.${id}` }, (pl) => {
       if (!state.comments.some((c) => c.id === pl.new.id)) state.comments.push(pl.new);
       rerender("comments");
+    })
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "shoots", filter: `id=eq.${id}` }, (pl) => {
+      Object.assign(state.shoot, pl.new); rerender("shoot");
     })
     .subscribe((st) => {
       const on = st === "SUBSCRIBED";
@@ -247,56 +341,113 @@ async function shootView(id, tab) {
   else rerender = bridgeTab(body, state);
 }
 
+// a quiet "just developed" card for every photo that arrives from the camera
+function arrival(p) {
+  let box = $("#arrivals");
+  if (!box) { box = h(`<div class="arrivals" id="arrivals" aria-live="polite"></div>`); document.body.append(box); onLeave(() => box.remove()); }
+  const card = h(`<div class="arrival"><img alt="" src="${esc(p.thumb_url)}"><div><b>Just developed</b><span>${esc(p.name)}${p.blurry ? " · soft focus" : ""}</span></div></div>`);
+  box.prepend(card);
+  while (box.children.length > 3) box.lastElementChild.remove();
+  setTimeout(() => { card.classList.add("out"); setTimeout(() => card.remove(), 400); }, 3800);
+}
+
+// gallery: keyed rendering, so existing photos are never re-created and nothing flickers
 function galleryTab(body, state) {
   let filter = "all";
+  const cards = new Map();
   body.replaceChildren(h(`<main><div class="bar">
       <div class="seg" id="flt">
         <button data-f="all" aria-pressed="true">All</button><button data-f="keep" aria-pressed="false">Keepers</button>
         <button data-f="star" aria-pressed="false">★ Starred</button><button data-f="pick" aria-pressed="false">♥ Client picks</button>
         <button data-f="flag" aria-pressed="false">Flagged</button></div>
-      <span class="count" id="cnt"></span></div>
+      <span class="count" id="cnt"></span><span class="sp"></span>
+      <button class="btn" id="show" title="Slideshow">▶ Slideshow</button>
+      <button class="btn" id="lr" title="Copy file names for Lightroom">Copy for Lightroom</button></div>
     <div class="grid" id="grid"></div><div id="empty"></div></main>`));
   const vis = (p) => filter === "all" || (filter === "star" ? p.star : filter === "pick" ? p.pick : filter === "keep" ? !p.blurry && !p.dup_of : p.blurry || p.dup_of);
   const sorted = () => [...state.photos.values()].sort((a, b) => new Date(b.taken) - new Date(a.taken) || b.id - a.id);
   const ccount = () => { const m = {}; state.comments.forEach((c) => (m[c.photo_id] = (m[c.photo_id] || 0) + 1)); return m; };
-  const render = () => {
+  const makeCard = (p) => {
+    const el = h(`<div class="ph"><img loading="lazy" decoding="async" alt=""><div class="tags"></div><button class="star" title="Star (S)">★</button></div>`);
+    const img = el.querySelector("img");
+    img.onload = () => img.classList.add("ok");
+    img.src = p.thumb_url;
+    el.dataset.id = p.id;
+    el.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleStar(state.photos.get(+el.dataset.id)); };
+    el.onclick = () => { const list = sorted().filter(vis); openLb(list.map((x) => x.id), +el.dataset.id, ownerLb(state)); };
+    return el;
+  };
+  const paintCard = (el, p, cc) => {
+    el.classList.toggle("dim", !!(p.blurry || p.dup_of));
+    el.querySelector(".star").classList.toggle("on", !!p.star);
+    const img = el.querySelector("img");
+    if (img.getAttribute("src") !== p.thumb_url) { img.classList.remove("ok"); img.src = p.thumb_url; }
+    const cover = state.shoot.cover_photo === p.id;
+    el.querySelector(".tags").innerHTML = `${cover ? '<span class="tag k">COVER</span>' : ""}${p.blurry ? '<span class="tag w">BLUR</span>' : ""}${p.dup_of ? '<span class="tag w">DUP</span>' : ""}${p.pick ? '<span class="tag p">♥ CLIENT</span>' : ""}${cc[p.id] ? `<span class="tag c">💬 ${cc[p.id]}</span>` : ""}`;
+  };
+  let raf = 0;
+  const render = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(renderNow); };
+  const renderNow = () => {
+    const grid = $("#grid");
+    if (!grid) return;
     const list = sorted().filter(vis), cc = ccount();
-    $("#grid").replaceChildren(...list.map((p) => {
-      const el = h(`<div class="ph ${p.blurry || p.dup_of ? "dim" : ""} ${state.fresh === p.id ? "new" : ""}">
-        <img loading="lazy" alt="" src="${esc(p.thumb_url)}">
-        <div class="tags">${p.blurry ? '<span class="tag w">BLUR</span>' : ""}${p.dup_of ? '<span class="tag w">DUP</span>' : ""}${p.pick ? '<span class="tag p">♥ CLIENT</span>' : ""}${cc[p.id] ? `<span class="tag c">💬 ${cc[p.id]}</span>` : ""}</div>
-        <button class="star ${p.star ? "on" : ""}" title="Star (S)">★</button></div>`);
-      const img = el.querySelector("img"); img.onload = () => img.classList.add("ok"); if (img.complete) img.classList.add("ok");
-      el.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleStar(p); };
-      el.onclick = () => openLb(list.map((x) => x.id), p.id, ownerLb(state));
+    for (const id of cards.keys()) if (!state.photos.has(id)) cards.delete(id);
+    const els = list.map((p) => {
+      let el = cards.get(p.id);
+      if (!el) { el = makeCard(p); cards.set(p.id, el); if (state.fresh?.has(p.id)) el.classList.add("new"); }
+      paintCard(el, p, cc);
       return el;
-    }));
-    state.fresh = null;
+    });
+    if (els.length !== grid.children.length || els.some((el, i) => grid.children[i] !== el)) grid.replaceChildren(...els);
+    state.fresh?.clear();
     const all = [...state.photos.values()];
     $("#cnt").textContent = `${all.length} shots · ${all.filter((p) => p.star).length} ★ · ${all.filter((p) => p.pick).length} ♥ · ${all.filter((p) => p.blurry || p.dup_of).length} flagged`;
     $("#empty").innerHTML = all.length ? "" : `<div class="empty"><h2>Waiting for your camera</h2><p>Open the <a href="#/s/${state.shoot.id}/bridge">Camera</a> tab to connect your Sony. Photos develop here the moment you take them.</p></div>`;
   };
   async function toggleStar(p) {
-    p.star = !p.star; render();
+    if (!p) return;
+    p.star = !p.star; renderNow(); lbRefresh();
     const { error } = await sb.from("photos").update({ star: p.star }).eq("id", p.id);
-    if (error) { p.star = !p.star; render(); toast(error.message); }
+    if (error) { p.star = !p.star; renderNow(); toast(error.message); }
   }
   state.toggleStar = toggleStar;
   $("#flt").onclick = (e) => {
     const b = e.target.closest("button"); if (!b) return; filter = b.dataset.f;
-    $("#flt").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); render();
+    $("#flt").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); renderNow();
   };
-  render();
-  return () => { render(); lbRefresh(); };
+  $("#show").onclick = () => {
+    const list = sorted().filter(vis).reverse();
+    if (!list.length) return toast("No photos to show yet");
+    openShow(list.map((p) => p.preview_url), state.shoot.title);
+  };
+  $("#lr").onclick = () => {
+    const all = [...state.photos.values()];
+    const picks = all.filter((p) => p.pick), stars = all.filter((p) => p.star);
+    const set = picks.length ? picks : stars;
+    if (!set.length) return toast("Star photos or wait for client picks first");
+    const stems = set.map((p) => p.name.replace(/\.[^.]+$/, ""));
+    copy(stems.join(" "), `Copied ${set.length} ${picks.length ? "client picks" : "starred"}. In Lightroom: Library Filter → Text → Filename → Contains, then paste.`);
+  };
+  renderNow();
+  return (what) => { if (what === "shoot") renderNow(); else render(); setTimeout(lbRefresh, 0); };
 }
 
 function ownerLb(state) {
   return {
     get: (id) => state.photos.get(id),
     comments: (id) => state.comments.filter((c) => c.photo_id === id),
-    head: (p) => `<button class="btn small" data-act="star">${p.star ? "★ Starred" : "☆ Star"}</button>${p.pick ? '<span class="tag p">♥ Client pick</span>' : ""}<button class="btn small ghost danger" data-act="del" title="Delete photo">Delete</button>`,
+    head: (p) => `<button class="btn small" data-act="star">${p.star ? "★ Starred" : "☆ Star"}</button>
+      <button class="btn small ghost" data-act="cover">${state.shoot.cover_photo === p.id ? "✓ Cover" : "Set as cover"}</button>
+      ${p.pick ? '<span class="tag p">♥ Client</span>' : ""}<button class="btn small ghost danger" data-act="del" title="Delete photo">Delete</button>`,
     act: async (p, act) => {
       if (act === "star") return state.toggleStar(p);
+      if (act === "cover") {
+        const next = state.shoot.cover_photo === p.id ? null : p.id;
+        const { error } = await sb.from("shoots").update({ cover_photo: next }).eq("id", state.shoot.id);
+        if (error) return toast(error.message);
+        state.shoot.cover_photo = next; state.rerender?.("shoot"); lbRefresh();
+        return toast(next ? "Cover photo set. Clients see it first." : "Cover removed");
+      }
       if (act === "del") {
         if (!confirm(`Delete ${p.name}? This removes it from the gallery, album and client link. The original stays on your computer.`)) return;
         try {
@@ -320,21 +471,23 @@ function ownerLb(state) {
 }
 
 let LB = null;
-function openLb(ids, id, api) { LB = { ids, id, api }; $("#lb").hidden = false; lbRefresh(); }
-function closeLb() { LB = null; const lb = $("#lb"); if (lb) { lb.hidden = true; lb.innerHTML = ""; } }
+function openLb(ids, id, api) { LB = { ids, id, api }; $("#lb").hidden = false; document.body.classList.add("noscroll"); lbRefresh(); }
+function closeLb() { LB = null; document.body.classList.remove("noscroll"); const lb = $("#lb"); if (lb) { lb.hidden = true; lb.innerHTML = ""; } }
 function lbRefresh() {
   if (!LB) return;
   const p = LB.api.get(LB.id); if (!p) return closeLb();
   const cmts = LB.api.comments(p.id);
   const lb = $("#lb");
   const draft = lb.querySelector("textarea")?.value || "";
-  lb.innerHTML = `<div class="stage"><img src="${esc(p.preview_url || p.preview)}" alt="">
+  const wm = LB.api.watermark ? `<div class="wm" aria-hidden="true">${esc(LB.api.watermark)}</div>` : "";
+  lb.innerHTML = `<div class="stage"><div class="lb-img"><img src="${esc(p.preview_url || p.preview)}" alt="">${wm}</div>
       <button class="nav l" data-nav="-1" aria-label="Previous">‹</button><button class="nav r" data-nav="1" aria-label="Next">›</button>
-      <div class="info">${LB.api.info(p)} · ← → to browse · Esc to close</div></div>
+      <div class="info">${LB.api.info(p)} · ${LB.ids.indexOf(LB.id) + 1} / ${LB.ids.length} · ← → to browse · Esc to close</div></div>
     <aside><div class="head">${LB.api.head(p)}<span class="sp"></span><button class="btn small ghost" data-act="close">Close</button></div>
       <div class="list">${cmts.length ? cmts.map((c) => `<div class="cmt ${c.from_owner ? "own" : ""}"><b>${esc(c.author)}</b><p>${esc(c.body)}</p></div>`).join("") : '<div class="muted">No comments yet.</div>'}</div>
       <form><textarea class="input" rows="2" placeholder="Add a comment…" required></textarea><button class="btn primary small" style="justify-self:end">Send</button></form></aside>`;
   const ta = lb.querySelector("textarea"); ta.value = draft;
+  if (LB.api.noSave) lb.querySelector(".lb-img img").oncontextmenu = (e) => e.preventDefault();
   lb.querySelector(".stage").onclick = (e) => { if (e.target.classList.contains("stage")) closeLb(); };
   lb.querySelectorAll("[data-nav]").forEach((b) => (b.onclick = () => lbStep(+b.dataset.nav)));
   lb.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => (b.dataset.act === "close" ? closeLb() : (LB.api.act(p, b.dataset.act), setTimeout(lbRefresh, 30)))));
@@ -343,9 +496,13 @@ function lbRefresh() {
     ta.value = ""; await LB.api.send(p, t); lbRefresh();
   };
   ta.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); lb.querySelector("form").requestSubmit(); } };
+  const st = lb.querySelector(".stage"); let x0 = null;
+  st.ontouchstart = (e) => (x0 = e.touches[0].clientX);
+  st.ontouchend = (e) => { if (x0 === null) return; const dx = e.changedTouches[0].clientX - x0; if (Math.abs(dx) > 50) lbStep(dx < 0 ? 1 : -1); x0 = null; };
 }
 function lbStep(d) { if (!LB) return; const i = LB.ids.indexOf(LB.id) + d; if (i >= 0 && i < LB.ids.length) { LB.id = LB.ids[i]; lbRefresh(); } }
 addEventListener("keydown", (e) => {
+  if (SHOW) { if (e.key === "Escape") closeShow(); else if (e.key === "ArrowRight") SHOW.step(1); else if (e.key === "ArrowLeft") SHOW.step(-1); else if (e.key === " ") { e.preventDefault(); SHOW.toggle(); } return; }
   if (!LB || e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
   if (e.key === "Escape") closeLb();
   else if (e.key === "ArrowRight") lbStep(1);
@@ -353,30 +510,111 @@ addEventListener("keydown", (e) => {
   else if (LB.api.keys[e.key.toLowerCase()]) { LB.api.act(LB.api.get(LB.id), LB.api.keys[e.key.toLowerCase()]); setTimeout(lbRefresh, 30); }
 });
 
+// slideshow: cross-fade with a slow Ken Burns drift
+let SHOW = null;
+function openShow(urls, title, watermark) {
+  closeShow();
+  const el = h(`<div class="show" role="dialog" aria-label="Slideshow">
+    <div class="show-frame a"></div><div class="show-frame b"></div>${watermark ? `<div class="wm" aria-hidden="true">${esc(watermark)}</div>` : ""}
+    <div class="show-ui"><span class="show-title">${esc(title || "")}</span><span class="sp"></span><span class="count" id="showCount"></span>
+      <button class="btn small ghost" data-s="prev" aria-label="Previous">‹</button><button class="btn small ghost" data-s="play">Pause</button>
+      <button class="btn small ghost" data-s="next" aria-label="Next">›</button><button class="btn small ghost" data-s="close">Close</button></div></div>`);
+  document.body.append(el); document.body.classList.add("noscroll");
+  let i = -1, playing = true, t, front = "a";
+  const frames = { a: el.querySelector(".a"), b: el.querySelector(".b") };
+  const show = (n) => {
+    const target = (n + urls.length) % urls.length;
+    const img = new Image();
+    img.onload = () => {
+      if (!SHOW || SHOW.el !== el) return;
+      i = target;
+      const back = front === "a" ? "b" : "a";
+      frames[back].style.backgroundImage = `url("${urls[i]}")`;
+      frames[back].classList.remove("on"); void frames[back].offsetWidth; frames[back].classList.add("on");
+      frames[front].classList.remove("on"); front = back;
+      el.querySelector("#showCount").textContent = `${i + 1} / ${urls.length}`;
+      [1, 2].forEach((k) => { const pre = new Image(); pre.src = urls[(i + k) % urls.length]; });
+    };
+    img.src = urls[target];
+  };
+  const loop = () => { clearTimeout(t); if (playing) t = setTimeout(() => { show(i + 1); loop(); }, 4500); };
+  SHOW = {
+    el, step: (d) => { show(i + d); loop(); },
+    toggle: () => { playing = !playing; el.querySelector('[data-s="play"]').textContent = playing ? "Pause" : "Play"; loop(); },
+    stop: () => clearTimeout(t),
+    index: () => i,
+  };
+  el.querySelector('[data-s="prev"]').onclick = () => SHOW.step(-1);
+  el.querySelector('[data-s="next"]').onclick = () => SHOW.step(1);
+  el.querySelector('[data-s="play"]').onclick = () => SHOW.toggle();
+  el.querySelector('[data-s="close"]').onclick = closeShow;
+  el.requestFullscreen?.().catch(() => {});
+  show(0); loop();
+}
+function closeShow() {
+  if (!SHOW) return;
+  SHOW.stop(); SHOW.el.remove(); SHOW = null; document.body.classList.remove("noscroll");
+  if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+}
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && SHOW) closeShow(); });
+
 function shareTab(body, state) {
   const s = state.shoot;
   const url = `${location.origin}/#/p/${s.share_token}`;
+  const day = (ts) => (ts ? new Date(ts).toISOString().slice(0, 10) : "");
   body.replaceChildren(h(`<main><div class="wrap panel-grid">
-    <div class="card"><div class="switch-row"><div><div class="label">Proofing link</div><h3 style="margin:4px 0 0;font-family:var(--serif);font-weight:500">Share with your clients</h3></div>
+    <div class="card"><div class="switch-row"><div><div class="label">Proofing link</div><h3 class="card-h">Share with your clients</h3></div>
       <button class="toggle" id="tg" role="switch" aria-checked="${s.sharing}" aria-label="Sharing on/off"></button></div>
-      <p class="muted">Clients open the link with no account, heart their favorites and leave comments. They see your <b>starred</b> photos; if nothing is starred, every photo that isn't flagged.</p>
-      <div class="kv"><input class="input" readonly value="${esc(url)}"><button class="btn" id="cp">Copy</button><a class="btn" href="${esc(url)}" target="_blank" rel="noopener">Open</a></div>
+      <p class="muted">Clients open the link with no account, heart their favorites, leave comments and send you their final selection. They see your <b>starred</b> photos; if nothing is starred, every photo that isn't flagged.</p>
+      <div class="kv"><input class="input" readonly value="${esc(url)}"><button class="btn" id="cp">Copy</button><a class="btn" href="${esc(url)}" target="_blank" rel="noopener">Preview</a></div>
       <p class="muted" id="st" style="margin-bottom:0"></p></div>
+    <div class="card"><div class="label">Gallery settings</div><h3 class="card-h">How clients see it</h3>
+      <form class="settings" id="set" onsubmit="return false">
+        <label>Shoot date<input class="input" type="date" name="shoot_date" value="${esc(s.shoot_date || "")}"></label>
+        <label>Link expires<input class="input" type="date" name="expires_at" value="${esc(day(s.expires_at))}"><small>Leave empty to keep it open.</small></label>
+        <label>Watermark<input class="input" name="watermark" maxlength="60" placeholder="e.g. © Suabers Capture" value="${esc(s.watermark || "")}"><small>Shown over photos on the client page.</small></label>
+        <div class="row"><span>Allow downloads<small>Web-size (2400px) JPEGs.</small></span><button type="button" class="toggle" id="dl" role="switch" aria-checked="${s.allow_download}" aria-label="Allow downloads"></button></div>
+        <label>Gallery password<div class="kv"><div class="pw" style="flex:1"><input class="input" name="pw" type="password" placeholder="${s.share_pw_hash ? "Password is set. Type to change" : "No password"}" autocomplete="new-password">${EYE}</div><button type="button" class="btn" id="pwSave">Save</button>${s.share_pw_hash ? '<button type="button" class="btn ghost" id="pwClear">Remove</button>' : ""}</div></label>
+      </form></div>
     <div class="card"><div class="label">Client activity</div><div id="act" style="margin-top:10px"></div></div>
   </div></main>`));
+  wireEyes(body);
+  const save = async (patch, msg = "Saved") => {
+    const { error } = await sb.from("shoots").update(patch).eq("id", s.id);
+    if (error) return toast(error.message);
+    Object.assign(s, patch); toast(msg); paint();
+  };
+  const f = $("#set");
+  f.shoot_date.onchange = () => save({ shoot_date: f.shoot_date.value || null });
+  f.expires_at.onchange = () => save({ expires_at: f.expires_at.value ? new Date(f.expires_at.value + "T23:59:59").toISOString() : null }, f.expires_at.value ? `Link closes after ${fmtDate(f.expires_at.value)}` : "Link never expires");
+  f.watermark.onchange = () => save({ watermark: f.watermark.value.trim() || null });
+  $("#dl").onclick = () => save({ allow_download: !s.allow_download }, !s.allow_download ? "Downloads on" : "Downloads off");
+  $("#pwSave").onclick = async () => {
+    const pw = f.pw.value; if (pw.length < 4) return toast("Use at least 4 characters");
+    const { error } = await sb.rpc("set_share_password", { p_shoot: s.id, p_password: pw });
+    if (error) return toast(error.message);
+    s.share_pw_hash = "set"; toast("Password set. Share it with your client separately."); route();
+  };
+  if ($("#pwClear")) $("#pwClear").onclick = async () => {
+    const { error } = await sb.rpc("set_share_password", { p_shoot: s.id, p_password: "" });
+    if (error) return toast(error.message);
+    s.share_pw_hash = null; toast("Password removed"); route();
+  };
   const paint = () => {
+    if (!$("#tg")) return;
     $("#tg").setAttribute("aria-checked", s.sharing);
-    $("#st").textContent = s.sharing ? "Sharing is on. Anyone with the link can view and pick." : "Sharing is off. The link shows nothing until you turn it on.";
+    $("#dl").setAttribute("aria-checked", s.allow_download);
+    const expired = s.expires_at && new Date(s.expires_at) < new Date();
+    $("#st").textContent = !s.sharing ? "Sharing is off. The link shows nothing until you turn it on."
+      : expired ? "This link has expired. Clear or move the expiry date to reopen it."
+      : `Sharing is on${s.share_pw_hash ? " with a password" : ""}. Anyone with the link${s.share_pw_hash ? " and password" : ""} can view and pick.`;
     const all = [...state.photos.values()], picks = all.filter((p) => p.pick), cl = state.comments.filter((c) => !c.from_owner);
-    $("#act").innerHTML = `<div style="font-size:28px;font-family:var(--serif)">${picks.length} <span class="muted" style="font-size:14px">favorites</span> · ${cl.length} <span class="muted" style="font-size:14px">comments</span></div>
+    $("#act").innerHTML = `${s.submitted_at ? `<div class="submitted">✓ <b>${esc(s.submitted_by || "Client")}</b> sent their final selection · ${new Date(s.submitted_at).toLocaleString()}</div>` : ""}
+      <div style="font-size:28px;font-family:var(--serif)">${picks.length} <span class="muted" style="font-size:14px">favorites</span> · ${cl.length} <span class="muted" style="font-size:14px">comments</span></div>
       ${picks.length ? `<p><a href="#/s/${s.id}/gallery">See client picks in the Gallery →</a></p>` : ""}
       ${cl.slice(-5).reverse().map((c) => `<div class="cmt" style="margin-top:8px"><b>${esc(c.author)}</b> on ${esc(state.photos.get(c.photo_id)?.name || "a photo")}<p>${esc(c.body)}</p></div>`).join("")}`;
   };
-  $("#tg").onclick = async () => {
-    s.sharing = !s.sharing; paint();
-    const { error } = await sb.from("shoots").update({ sharing: s.sharing }).eq("id", s.id);
-    if (error) { s.sharing = !s.sharing; paint(); toast(error.message); }
-  };
+  $("#tg").onclick = () => save({ sharing: !s.sharing }, !s.sharing ? "Sharing on" : "Sharing off");
   $("#cp").onclick = () => copy(url);
   paint();
   return paint;
@@ -386,19 +624,19 @@ function bridgeTab(body, state) {
   const s = state.shoot;
   const cmd = `cd darkroom/bridge && ./start.sh ${s.ingest_key}`;
   body.replaceChildren(h(`<main><div class="wrap panel-grid">
-    <div class="card"><div class="label">Step 1 · on your Mac</div><h3 style="margin:4px 0 10px;font-family:var(--serif);font-weight:500">Start the camera bridge</h3>
+    <div class="card"><div class="label">Step 1 · on your Mac</div><h3 class="card-h">Start the camera bridge</h3>
       <p class="muted">The bridge receives photos from your camera over Wi-Fi and develops them here. Run this in Terminal and leave it open while you shoot:</p>
       <div class="code" id="cmd">${esc(cmd)}</div>
       <div class="kv" style="margin-top:10px"><button class="btn" id="cpc">Copy command</button><button class="btn ghost" id="cpk">Copy shoot key</button></div>
       <p class="muted" style="font-size:12.5px">First time? <code>git clone https://github.com/jayeed17/darkroom</code>. The terminal prints your Mac's IP for step 2.</p></div>
-    <div class="card"><div class="label">Step 2 · on the camera</div><h3 style="margin:4px 0 10px;font-family:var(--serif);font-weight:500">Sony FX3 · a7 IV · a7R V</h3>
+    <div class="card"><div class="label">Step 2 · on the camera</div><h3 class="card-h">Sony FX3 · a7 IV · a7R V</h3>
       <ol class="steps">
         <li>Join the <b>same Wi-Fi</b> as your Mac. Guest networks and carrier hotspots usually block this; a travel router works everywhere.</li>
         <li><b>Network → FTP Transfer Func. → Server Setting → Server 1</b>: Host = the IP the bridge printed, Port <b>2121</b>, User <b>sony</b>, Password <b>darkroom</b>, Secure Protocol <b>Off</b>, Passive <b>On</b></li>
         <li><b>FTP Function: On</b> · <b>Auto FTP Transfer: On</b> · Transfer Target: <b>JPEG</b></li>
         <li>Shoot. Photos develop in the <a href="#/s/${s.id}/gallery">Gallery</a> within seconds.</li>
       </ol></div>
-    <div class="card danger-card"><div class="label">Danger zone</div><h3 style="margin:4px 0 6px;font-family:var(--serif);font-weight:500">Delete this shoot</h3>
+    <div class="card danger-card"><div class="label">Danger zone</div><h3 class="card-h">Delete this shoot</h3>
       <p class="muted">Removes every photo, comment, the album and the client link from Darkroom. Originals on your computer are not touched.</p>
       <button class="btn danger" id="delShoot">Delete shoot…</button></div>
   </div></main>`));
@@ -440,6 +678,7 @@ function albumTab(body, state) {
   const render = () => {
     const size = SIZES[album.size] || SIZES["12x12"], u = used();
     const wrap = $("#spreads");
+    if (!wrap) return;
     if (!album.spreads.length) {
       wrap.innerHTML = `<div class="empty"><h2>No spreads yet</h2><p>Star your favorites in the Gallery, then hit <b>Auto-layout</b>, or add a spread and drag photos in.</p></div>`;
     } else {
@@ -499,62 +738,118 @@ function albumTab(body, state) {
   return (what) => { if (what === "photos") render(); };
 }
 
-async function proofView(token) {
+// client proofing page (no login)
+async function proofView(token, wrongPw) {
   app.replaceChildren(h(`<div class="boot">Developing…</div>`));
-  let data;
+  const pwKey = "darkroom:pw:" + token;
+  let password = sget(pwKey) || null;
   const load = async () => {
-    const { data: d, error } = await sb.rpc("share_get", { p_token: token });
-    if (error) throw error; return d;
+    const { data: d, error } = await sb.rpc("share_get", { p_token: token, p_password: password });
+    if (error) { if (/password/i.test(error.message)) return { needPassword: true }; throw error; }
+    return d;
   };
-  try { data = await load(); } catch (e) { data = null; }
+  let data;
+  try { data = await load(); } catch { data = null; }
+  if (data?.needPassword) {
+    app.replaceChildren(h(`<div class="auth gate"><div class="auth-box">
+      <span class="brand">${LOGO} Darkroom</span>
+      <h1 style="font-size:34px">A private gallery.</h1>
+      <p class="lede">Enter the password your photographer gave you.</p>
+      <form id="g"><div class="pw"><input class="input" name="pw" type="password" placeholder="Gallery password">${EYE}</div>
+      <div class="msg bad" id="gmsg">${password || wrongPw ? "That password isn't right." : ""}</div>
+      <button class="btn primary big">Open gallery</button></form></div></div>`));
+    wireEyes(app);
+    $("#g").pw.focus();
+    $("#g").onsubmit = (e) => { e.preventDefault(); sset(pwKey, e.target.pw.value); proofView(token, true); };
+    return;
+  }
+  if (data?.expired) { app.replaceChildren(h(`<div class="empty"><h2>This gallery has closed</h2><p>The viewing window for this gallery has ended. Ask your photographer to reopen it.</p></div>`)); return; }
   if (!data) { app.replaceChildren(h(`<div class="empty"><h2>This gallery isn't available</h2><p>The link may be off or mistyped. Ask your photographer for a fresh one.</p></div>`)); return; }
-  let name = ""; try { name = localStorage.getItem("darkroom:name") || ""; } catch {}
+
+  let name = lget("darkroom:name") || "";
   const photos = new Map(data.photos.map((p) => [p.id, p]));
   let comments = data.comments;
-  app.replaceChildren(h(`<div>
-    <header class="top"><span class="brand">${LOGO} Darkroom</span><span class="sp"></span><span class="count" id="cnt"></span>
-      <div class="seg" id="flt"><button data-f="all" aria-pressed="true">All</button><button data-f="pick" aria-pressed="false">♥ My favorites</button></div></header>
-    <div class="proof-hero"><div class="label">Proofing gallery</div><h1>${esc(data.title)}</h1><p>Tap ♥ on the photos you love. Open a photo to leave a comment.</p></div>
-    <div class="masonry" id="grid"></div></div>`));
+  const coverUrl = data.cover || data.photos[0]?.preview || "";
+  app.replaceChildren(h(`<div class="proof">
+    <section class="cover-hero ${coverUrl ? "" : "plain"}">
+      ${coverUrl ? `<div class="cover-img" style="background-image:url('${esc(coverUrl)}')"></div>` : ""}
+      <div class="cover-shade"></div>
+      <div class="cover-text">
+        <div class="label">${data.date ? esc(fmtDate(data.date)) : "Proofing gallery"}</div>
+        <h1>${esc(data.title)}</h1>
+        <p>${data.photos.length} photograph${data.photos.length === 1 ? "" : "s"}</p>
+        <a class="btn ghost-light" href="#" id="enter">View gallery</a>
+      </div>
+    </section>
+    <header class="top" id="ptop"><span class="brand">${LOGO} <span class="ptitle">${esc(data.title)}</span></span><span class="sp"></span><span class="count" id="cnt"></span>
+      <div class="seg" id="flt"><button data-f="all" aria-pressed="true">All</button><button data-f="pick" aria-pressed="false">♥ Favorites</button></div>
+      <button class="btn" id="show">▶ Slideshow</button></header>
+    <p class="proof-help">Tap ♥ on the photos you love. Open a photo to comment${data.allow_download ? " or download" : ""}. When you're done, send your selection.${data.expires_at ? ` Open until ${esc(fmtDate(data.expires_at.slice(0, 10)))}.` : ""}</p>
+    <div class="masonry" id="grid"></div>
+    <div class="submit-bar" id="sbar"></div></div>`));
+  $("#enter").onclick = (e) => { e.preventDefault(); $("#ptop").scrollIntoView({ behavior: "smooth" }); };
   let filter = "all";
+  const wm = data.watermark ? `<div class="wm small" aria-hidden="true">${esc(data.watermark)}</div>` : "";
   const render = () => {
     const list = [...photos.values()].filter((p) => filter === "all" || p.pick);
     $("#grid").replaceChildren(...list.map((p) => {
-      const el = h(`<div class="ph"><img loading="lazy" alt="" src="${esc(p.thumb)}" style="aspect-ratio:${p.w || 3}/${p.h || 2}"><button class="star heart ${p.pick ? "on" : ""}" title="Favorite">♥</button></div>`);
+      const el = h(`<div class="ph"><img loading="lazy" alt="" src="${esc(p.thumb)}" style="aspect-ratio:${p.w || 3}/${p.h || 2}">${wm}<button class="star heart ${p.pick ? "on" : ""}" title="Favorite">♥</button></div>`);
       const img = el.querySelector("img"); img.onload = () => img.classList.add("ok"); if (img.complete) img.classList.add("ok");
+      if (!data.allow_download) img.oncontextmenu = (e) => e.preventDefault();
       el.querySelector(".heart").onclick = (e) => { e.stopPropagation(); pick(p); };
       el.onclick = () => openLb(list.map((x) => x.id), p.id, api);
       return el;
     }));
+    if (!list.length && filter === "pick") $("#grid").innerHTML = `<p class="muted" style="text-align:center">No favorites yet. Tap ♥ on a photo to add it.</p>`;
     const n = [...photos.values()].filter((p) => p.pick).length;
     $("#cnt").textContent = `${photos.size} photos · ${n} ♥`;
+    $("#sbar").innerHTML = data.submitted_at
+      ? `<span>✓ Selection sent${data.submitted_by ? ` by ${esc(data.submitted_by)}` : ""} · ${esc(new Date(data.submitted_at).toLocaleDateString())}</span><button class="btn small ghost-light" id="resubmit">Send again</button>`
+      : `<span><b>${n}</b> favorite${n === 1 ? "" : "s"} selected</span><button class="btn primary" id="submit" ${n ? "" : "disabled"}>Send my selection</button>`;
+    ($("#submit") || $("#resubmit")).onclick = submit;
   };
+  async function submit() {
+    const n = [...photos.values()].filter((p) => p.pick).length;
+    if (!n) return toast("Tap ♥ on your favorites first");
+    if (!name) { name = (prompt("Your name, so your photographer knows who sent it") || "").trim(); if (name) lset("darkroom:name", name); }
+    if (!confirm(`Send ${n} favorite${n === 1 ? "" : "s"} to your photographer?`)) return;
+    const { data: ts, error } = await sb.rpc("share_submit", { p_token: token, p_name: name || "Client", p_password: password });
+    if (error) return toast("Couldn't send, try again");
+    data.submitted_at = ts; data.submitted_by = name || "Client"; render(); toast("Sent. Your photographer has your selection.");
+  }
   async function pick(p) {
     p.pick = !p.pick; render(); lbRefresh();
-    const { error } = await sb.rpc("share_pick", { p_token: token, p_photo: p.id, p_pick: p.pick });
+    const { error } = await sb.rpc("share_pick", { p_token: token, p_photo: p.id, p_pick: p.pick, p_password: password });
     if (error) { p.pick = !p.pick; render(); toast("Couldn't save, try again"); }
   }
   const api = {
     get: (id) => photos.get(id),
     comments: (id) => comments.filter((c) => c.photo_id === id),
-    head: (p) => `<button class="btn small" data-act="pick">${p.pick ? "♥ Favorited" : "♡ Favorite"}</button>`,
-    act: (p, a) => a === "pick" && pick(p),
+    head: (p) => `<button class="btn small" data-act="pick">${p.pick ? "♥ Favorited" : "♡ Favorite"}</button>${data.allow_download ? '<button class="btn small ghost" data-act="dl">Download</button>' : ""}`,
+    act: (p, a) => { if (a === "pick") pick(p); if (a === "dl") download(p.preview, p.name.replace(/\.[^.]+$/, "") + ".jpg"); },
     send: async (p, text) => {
-      if (!name) { name = (prompt("Your name (so your photographer knows who commented)") || "").trim(); if (name) try { localStorage.setItem("darkroom:name", name); } catch {} }
-      const { data: id, error } = await sb.rpc("share_comment", { p_token: token, p_photo: p.id, p_author: name || "Client", p_body: text });
+      if (!name) { name = (prompt("Your name (so your photographer knows who commented)") || "").trim(); if (name) lset("darkroom:name", name); }
+      const { data: id, error } = await sb.rpc("share_comment", { p_token: token, p_photo: p.id, p_author: name || "Client", p_body: text, p_password: password });
       if (error) return toast("Couldn't send, try again");
       comments.push({ id, photo_id: p.id, author: name || "Client", body: text, from_owner: false });
     },
     info: (p) => esc(p.name),
     keys: { f: "pick" },
+    watermark: data.watermark,
+    noSave: !data.allow_download,
   };
   $("#flt").onclick = (e) => {
     const b = e.target.closest("button"); if (!b) return; filter = b.dataset.f;
     $("#flt").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); render();
   };
+  $("#show").onclick = () => {
+    const list = [...photos.values()].filter((p) => filter === "all" || p.pick);
+    if (!list.length) return toast("No photos to show");
+    openShow(list.map((p) => p.preview), data.title, data.watermark);
+  };
   render();
   const iv = setInterval(async () => {
-    try { const d = await load(); if (d) { comments = d.comments; lbRefresh(); } } catch {}
+    try { const d = await load(); if (d && !d.needPassword && !d.expired) { comments = d.comments; lbRefresh(); } } catch {}
   }, 20000);
   onLeave(() => clearInterval(iv));
 }
