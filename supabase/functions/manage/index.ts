@@ -47,18 +47,20 @@ Deno.serve(async (req) => {
 
   try {
     if (b.action === "delete_photo") {
-      const { data: p } = await admin.from("photos").select("id,name,shoot_id,shoots!inner(owner)").eq("id", Number(b.photo_id)).maybeSingle();
-      // deno-lint-ignore no-explicit-any
-      if (!p || (p as any).shoots.owner !== uid) return json({ error: "not found" }, 404);
+      // two plain lookups (no embed): shoots<->photos has two foreign keys since cover_photo, so an embed is ambiguous
+      const { data: p, error: pe } = await admin.from("photos").select("id,name,shoot_id").eq("id", Number(b.photo_id)).maybeSingle();
+      if (pe) throw pe;
+      const { data: own } = p ? await admin.from("shoots").select("owner").eq("id", p.shoot_id).maybeSingle() : { data: null };
+      if (!p || !own || own.owner !== uid) return json({ error: "not found" }, 404);
       await removeAll(pathsFor(p.shoot_id, p.name));
-      await admin.from("photos").delete().eq("id", p.id);
+      { const { error } = await admin.from("photos").delete().eq("id", p.id); if (error) throw error; }
       return json({ ok: true });
     }
     if (b.action === "delete_shoot") {
       const { data: s } = await admin.from("shoots").select("id,owner").eq("id", String(b.shoot_id)).maybeSingle();
       if (!s || s.owner !== uid) return json({ error: "not found" }, 404);
       await removeAll(await listAll(s.id));
-      await admin.from("shoots").delete().eq("id", s.id);
+      { const { error } = await admin.from("shoots").delete().eq("id", s.id); if (error) throw error; }
       return json({ ok: true });
     }
     if (b.action === "sweep_orphans") {
