@@ -327,10 +327,16 @@ async function shootView(id, tab) {
   let rerender = () => {};
   // Live events aren't replayed after a drop (venue Wi-Fi, laptop sleep), and a photo committed while the
   // subscription is still connecting would be missed. Re-sync on every (re)subscribe, on wake and when back online.
-  let lastSync = 0;
-  const resync = async () => {
-    if (Date.now() - lastSync < 3000) return;
+  // at most one sync per 3s; a request inside that window is deferred to its end, never dropped (after a
+  // reconnect "subscribed" and "changes flowing" arrive back to back, and the second one matters)
+  let lastSync = 0, trailing = 0;
+  const resync = () => {
+    const wait = lastSync + 3000 - Date.now();
+    if (wait > 0) { trailing ||= setTimeout(() => { trailing = 0; resync(); }, wait); return; }
     lastSync = Date.now();
+    syncNow();
+  };
+  const syncNow = async () => {
     const [{ data: ph, error: e1 }, { data: cm, error: e2 }] = await Promise.all([
       sb.from("photos").select("*").eq("shoot_id", id),
       sb.from("comments").select("*").eq("shoot_id", id).order("created_at"),
@@ -350,7 +356,7 @@ async function shootView(id, tab) {
   document.addEventListener("visibilitychange", onVisible);
   addEventListener("online", resync);
   const safety = setInterval(() => { if (document.visibilityState === "visible") resync(); }, 30000);
-  onLeave(() => { document.removeEventListener("visibilitychange", onVisible); removeEventListener("online", resync); clearInterval(safety); });
+  onLeave(() => { document.removeEventListener("visibilitychange", onVisible); removeEventListener("online", resync); clearInterval(safety); clearTimeout(trailing); });
   const ch = sb.channel(`shoot-${id}`)
     // sent by the server each time database changes start flowing to this channel, including after a reconnect
     .on("system", {}, (m) => { if (m?.extension === "postgres_changes" && m?.status === "ok") resync(); })
