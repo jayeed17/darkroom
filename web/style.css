@@ -147,7 +147,8 @@ main{padding:20px}
   main{padding:14px}
   .tabs{padding:0 8px}
   .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}
-  .bar .seg{overflow-x:auto;max-width:100%}
+  .bar .seg{overflow-x:auto;max-width:100%;scrollbar-width:none}
+  .bar .seg button{white-space:nowrap;flex:none}
   .auth h1{font-size:32px}
   .masonry{columns:2 150px;padding:0 10px 40px;column-gap:6px}
   .masonry .ph{margin-bottom:6px}

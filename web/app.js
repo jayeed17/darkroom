@@ -46,7 +46,9 @@ const friendly = (error) => {
   if (m.includes("invalid login")) return "That email and password don't match. If you just signed up, confirm your email first.";
   if (m.includes("email not confirmed")) return "Please confirm your email first. Check your inbox (and spam).";
   if (m.includes("already registered")) return "An account with this email already exists. Sign in or reset your password.";
-  if (m.includes("password should")) return "Password must be at least 8 characters.";
+  if (error?.code === "same_password" || m.includes("different from the old")) return "Your new password must be different from your current one.";
+  if (error?.code === "weak_password") return "That password is too easy to guess or has appeared in a data breach. Please choose a stronger one.";
+  if (m.includes("password should")) return error.message;
   if (m.includes("expired") || m.includes("invalid")) return "That link has expired or was already used. Request a new one below.";
   if (m.includes("fetch") || m.includes("network")) return "Can't reach the server. Check your connection and try again.";
   return error?.message || "Something went wrong. Please try again.";
@@ -323,7 +325,35 @@ async function shootView(id, tab) {
   state.comments = comments || [];
 
   let rerender = () => {};
+  // Live events aren't replayed after a drop (venue Wi-Fi, laptop sleep), and a photo committed while the
+  // subscription is still connecting would be missed. Re-sync on every (re)subscribe, on wake and when back online.
+  let lastSync = 0;
+  const resync = async () => {
+    if (Date.now() - lastSync < 3000) return;
+    lastSync = Date.now();
+    const [{ data: ph, error: e1 }, { data: cm, error: e2 }] = await Promise.all([
+      sb.from("photos").select("*").eq("shoot_id", id),
+      sb.from("comments").select("*").eq("shoot_id", id).order("created_at"),
+    ]);
+    if (stale(gen) || e1 || e2) return;
+    const seen = new Set(ph.map((p) => p.id)), added = [];
+    for (const p of ph) { if (!state.photos.has(p.id)) added.push(p); state.photos.set(p.id, p); }
+    for (const pid of [...state.photos.keys()]) if (!seen.has(pid)) state.photos.delete(pid);
+    state.comments = cm;
+    if (added.length) {
+      state.fresh ||= new Set(); added.forEach((p) => state.fresh.add(p.id));
+      added.sort((a, b) => a.id - b.id).slice(-3).forEach(arrival);
+    }
+    rerender("photos");
+  };
+  const onVisible = () => { if (document.visibilityState === "visible") resync(); };
+  document.addEventListener("visibilitychange", onVisible);
+  addEventListener("online", resync);
+  const safety = setInterval(() => { if (document.visibilityState === "visible") resync(); }, 30000);
+  onLeave(() => { document.removeEventListener("visibilitychange", onVisible); removeEventListener("online", resync); clearInterval(safety); });
   const ch = sb.channel(`shoot-${id}`)
+    // sent by the server each time database changes start flowing to this channel, including after a reconnect
+    .on("system", {}, (m) => { if (m?.extension === "postgres_changes" && m?.status === "ok") resync(); })
     .on("postgres_changes", { event: "*", schema: "public", table: "photos", filter: `shoot_id=eq.${id}` }, (pl) => {
       if (pl.eventType === "DELETE") state.photos.delete(pl.old.id);
       else {
@@ -340,12 +370,15 @@ async function shootView(id, tab) {
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "shoots", filter: `id=eq.${id}` }, (pl) => {
       Object.assign(state.shoot, pl.new); rerender("shoot");
     })
-    .subscribe((st) => {
-      const on = st === "SUBSCRIBED";
-      $("#live")?.classList.toggle("on", on);
-      if ($("#liveTxt")) $("#liveTxt").textContent = on ? "live" : "reconnecting";
-    });
-  onLeave(() => sb.removeChannel(ch));
+    .subscribe((st) => { setTimeout(paintLive, 0); if (st === "SUBSCRIBED") resync(); });
+  // the channel status callback doesn't fire when the socket silently drops, so read the real state
+  function paintLive() {
+    const on = ch.state === "joined" && (sb.realtime.isConnected?.() ?? true);
+    $("#live")?.classList.toggle("on", on);
+    if ($("#liveTxt")) $("#liveTxt").textContent = on ? "live" : "reconnecting";
+  }
+  const liveTick = setInterval(paintLive, 2000);
+  onLeave(() => { clearInterval(liveTick); sb.removeChannel(ch); });
 
   const body = $("#body");
   state.rerender = (w) => rerender(w);
@@ -399,8 +432,14 @@ function galleryTab(body, state) {
     const cover = state.shoot.cover_photo === p.id;
     el.querySelector(".tags").innerHTML = `${cover ? '<span class="tag k">COVER</span>' : ""}${p.blurry ? '<span class="tag w">BLUR</span>' : ""}${p.dup_of ? '<span class="tag w">DUP</span>' : ""}${p.pick ? '<span class="tag p">♥ CLIENT</span>' : ""}${cc[p.id] ? `<span class="tag c">💬 ${cc[p.id]}</span>` : ""}`;
   };
-  let raf = 0;
-  const render = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(renderNow); };
+  // batch bursts of arrivals into one paint: next animation frame, or 300ms at most, because browsers pause
+  // animation frames for covered/background windows and the gallery must still be current when you look
+  let raf = 0, rt = 0;
+  const render = () => {
+    cancelAnimationFrame(raf); clearTimeout(rt);
+    raf = requestAnimationFrame(() => { clearTimeout(rt); renderNow(); });
+    rt = setTimeout(() => { cancelAnimationFrame(raf); renderNow(); }, 300);
+  };
   const renderNow = () => {
     const grid = $("#grid");
     if (!grid) return;
