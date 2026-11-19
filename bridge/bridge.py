@@ -173,11 +173,16 @@ def ingest(path: Path):
     rgb = img.convert("RGB")
     prev = rgb.copy(); prev.thumbnail((2400, 2400), Image.LANCZOS); prev.save(CACHE / f"{stem}.preview.jpg", quality=86, optimize=True)
     th = rgb.copy(); th.thumbnail((640, 640), Image.LANCZOS); th.save(CACHE / f"{stem}.thumb.jpg", quality=80, optimize=True)
-    dup_of = None
-    for r in q("SELECT name, dhash FROM photos WHERE shoot=? ORDER BY added DESC LIMIT 40", KEY):
-        if r["dhash"] and hamming(r["dhash"], h) <= DUP_DISTANCE:
-            dup_of = r["name"]; break
     blurry = int(sharp < BLUR_THRESHOLD)
+    # Duplicate of the closest *keeper* only (sharp and not itself a duplicate). Linking to a soft or
+    # duplicate frame would hide the good shot of a burst whose first frame missed focus.
+    dup_of, best = None, DUP_DISTANCE + 1
+    for r in q("SELECT name, dhash, blurry, dup_of FROM photos WHERE shoot=? AND name<>? ORDER BY added DESC LIMIT 40", KEY, path.name):
+        if not r["dhash"] or r["blurry"] or r["dup_of"]:
+            continue
+        d = hamming(r["dhash"], h)
+        if d < best:
+            dup_of, best = r["name"], d
     q("""INSERT OR REPLACE INTO photos(name,path,w,h,taken,sharpness,dhash,blurry,dup_of,camera,synced,shoot,added)
          VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)""",
       path.name, str(path), img.width, img.height, taken or datetime.now(timezone.utc).isoformat(),
