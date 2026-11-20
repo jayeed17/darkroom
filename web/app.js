@@ -760,8 +760,9 @@ function bridgeTab(body, state) {
     brand.focus();
   }
   paintCam();
+  onLeave(closePicker);
   if (!choice && !lget(CAM_K + ":asked")) { lset(CAM_K + ":asked", "1"); openPicker(); }
-  return () => closePicker();
+  return () => {};  // re-render hook: nothing on this tab depends on live photo data
 }
 
 function albumTab(body, state) {
