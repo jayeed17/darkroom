@@ -13,5 +13,5 @@ if [ ! -d .venv ]; then
   python3 -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -r requirements.txt
 fi
 # Free the ports if an old bridge is still running
-lsof -ti :2121 -ti :8000 2>/dev/null | xargs kill 2>/dev/null || true
+lsof -ti :2121 -ti :47474 2>/dev/null | xargs kill 2>/dev/null || true
 exec .venv/bin/python bridge.py

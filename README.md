@@ -29,15 +29,15 @@ Darkroom is a minimal, open-source alternative to tools like Zno and Pixieset fo
 ## Use it
 
 1. Open the web app, create an account, and click **+ New shoot**.
-2. On your Mac:
-   ```bash
-   git clone https://github.com/jayeed17/darkroom
-   cd darkroom/bridge
-   ./start.sh <SHOOT_KEY>                      # key is on the shoot's Camera tab
-   ./start.sh <SHOOT_KEY> /Volumes/SSD/Darkroom  # optional: keep originals on your SSD
-   ```
+2. On your Mac: download **Darkroom Bridge** ([Apple silicon](https://github.com/jayeed17/darkroom/releases/latest/download/Darkroom-Bridge-AppleSilicon.dmg) ·
+   [Intel](https://github.com/jayeed17/darkroom/releases/latest/download/Darkroom-Bridge-Intel.dmg)), drag it to Applications and open it.
+   It lives in the menu bar (◉) and opens a control panel at http://localhost:47474.
+   On the shoot's **Camera** tab click **Connect this Mac**. Originals are saved in `~/Pictures/Darkroom/<shoot>`
+   (change it in the panel, e.g. to your SSD).
+
+   From source instead: `cd darkroom/bridge && ./start.sh <SHOOT_KEY> [/Volumes/SSD/Darkroom]`
 3. Camera: **Network → FTP Transfer Func. → Server 1**
-   Host = IP printed by the bridge · Port `2121` · User `sony` · Password `darkroom` · Secure **Off** · Passive **On**,
+   Host = the IP shown in the bridge panel · Port `2121` · User `sony` · Password `darkroom` · Secure **Off** · Passive **On**,
    then **FTP Function On**, **Auto FTP Transfer On**, Transfer Target **JPEG**.
 4. Shoot. Photos develop in the gallery. Star keepers → **Client proofing** → turn sharing on → send the link.
 5. **Album** → Auto-layout → tweak → **Export print PDF**.

@@ -1,0 +1,56 @@
+name: Mac bridge app
+on:
+  push:
+    branches: [main]
+    paths: ["bridge/**", "tests/bridge_*.py", ".github/workflows/bridge-mac.yml"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, flavor: AppleSilicon }
+          - { os: macos-15-intel, flavor: Intel }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Tests on macOS (from source)
+        run: |
+          set -o pipefail
+          python3 -m pip install -q -r bridge/requirements.txt
+          { python3 tests/bridge_e2e.py bridge/bridge.py 1 && NO_PROXY=127.0.0.1 python3 tests/bridge_online.py bridge/bridge.py 1; } 2>&1 | tee report-${{ matrix.flavor }}.txt
+          ! grep -q "^FAIL" report-${{ matrix.flavor }}.txt
+      - name: Build app + dmg
+        run: |
+          set -o pipefail
+          bridge/macos/build.sh ${{ matrix.flavor }} 2>&1 | tee -a report-${{ matrix.flavor }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.flavor }}
+          path: |
+            bridge/macos/Darkroom-Bridge-*.dmg
+            report-*.txt
+  release:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Publish
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          V=$(grep -oP 'VERSION = "\K[^"]+' bridge/bridge.py)
+          ls -la out
+          OK=$([ -f out/Darkroom-Bridge-AppleSilicon.dmg ] && [ -f out/Darkroom-Bridge-Intel.dmg ] && echo yes || echo no)
+          if [ "$OK" = yes ]; then TAG="bridge-v$V"; FLAGS="--latest"; else TAG="bridge-build-failed"; FLAGS="--prerelease"; fi
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" $FLAGS --title "Darkroom Bridge $V" \
+            --notes "Mac app that receives photos from your Sony camera over Wi-Fi. Download the Apple silicon (M1–M4) or Intel version." --target "$GITHUB_SHA"
+          gh release upload "$TAG" out/* --clobber
