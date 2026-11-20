@@ -260,8 +260,9 @@ input[type=date].input{color-scheme:dark}
 }
 
 /* camera picker */
-.cam-pick{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.62);display:grid;place-items:center;padding:16px;animation:fadein .15s ease}
+.cam-pick{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.62);display:grid;place-items:center;padding:16px}
 .cam-box{width:min(440px,100%);box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.cam-l[hidden]{display:none}
 .cam-l{display:block;margin-top:12px;font-size:12.5px;color:var(--mute)}
 .cam-l .select{display:block;width:100%;margin-top:4px}
-@keyframes fadein{from{opacity:0}to{opacity:1}}
+
