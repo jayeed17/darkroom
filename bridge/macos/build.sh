@@ -4,7 +4,8 @@
 set -euo pipefail
 FLAVOR="$1"; cd "$(dirname "$0")"
 python3 -m pip install -q --upgrade pip
-python3 -m pip install -q -r ../requirements.txt "rumps==0.4.0" "pyinstaller==6.*"
+python3 -m pip install -q -r ../requirements.txt "numpy<2" "rumps==0.4.0" "pyinstaller==6.*"
+python3 -c "import sys,platform;print('python',sys.version,'macOS',platform.mac_ver()[0])"
 python3 make_icon.py Darkroom.iconset && iconutil -c icns Darkroom.iconset -o Darkroom.icns
 python3 -m PyInstaller --noconfirm --clean --distpath dist --workpath build "Darkroom Bridge.spec"
 APP="dist/Darkroom Bridge.app"
@@ -18,6 +19,9 @@ MINOS=$(find "$APP" -type f \( -name "*.so" -o -name "*.dylib" -o -perm -111 \) 
   | sort -t. -k1,1n -k2,2n | tail -1)
 echo "minimum macOS: ${MINOS:-unknown}"
 echo "$MINOS" > minos.txt
+echo "binaries needing macOS 12+:"
+find "$APP" -type f \( -name "*.so" -o -name "*.dylib" -o -perm -111 \) | while read -r f; do
+  v=$(otool -l "$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}'); [ -n "$v" ] && [ "${v%%.*}" -ge 12 ] && echo "  $v ${f#$APP/}"; done | sort -rV | head -25 || true
 ./smoke.sh "$APP"
 mkdir -p dmg && rm -rf dmg/* && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
 hdiutil create -volname "Darkroom Bridge" -srcfolder dmg -ov -format UDZO "Darkroom-Bridge-$FLAVOR.dmg"

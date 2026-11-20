@@ -18,6 +18,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+if getattr(sys, "frozen", False):
+    # A packaged app is only ever started by the user. If a library re-runs sys.executable as a helper
+    # (multiprocessing, "python -c ..."), that must not start a second bridge.
+    import multiprocessing; multiprocessing.freeze_support()
+    if [a for a in sys.argv[1:] if not a.startswith("-psn_")]:
+        sys.exit(0)
+
 import numpy as np
 from PIL import Image, ImageOps
 from pyftpdlib.authorizers import DummyAuthorizer
@@ -69,7 +76,7 @@ for d in (INBOX, CACHE):
     d.mkdir(parents=True, exist_ok=True)
 INBOX = INBOX.resolve()  # the FTP server reports real paths (macOS: /var -> /private/var)
 
-STATUS = {"online": None, "last_camera": None, "last_file": None}
+STATUS = {"online": None, "last_camera": None, "last_file": None, "ftp_error": None}
 
 # ---------------------------------------------------------------- local state
 lock = threading.Lock()
@@ -297,6 +304,13 @@ class CameraHandler(FTPHandler):
         except OSError: pass
 
 def run_ftp():
+    try:
+        _run_ftp()
+    except OSError as e:
+        STATUS["ftp_error"] = f"The camera port {FTP_PORT} is used by another program. Quit it and restart Darkroom Bridge."
+        print("  !", STATUS["ftp_error"], e)
+
+def _run_ftp():
     auth = DummyAuthorizer()
     auth.add_user(FTP_USER, FTP_PASS, str(INBOX), perm="elradfmwMT")
     CameraHandler.authorizer = auth
@@ -379,6 +393,7 @@ def panel_html(msg=""):
 <span style="flex:1"></span><form method=post action=/quit onsubmit="return confirm('Stop the bridge? The camera will stop sending photos.')"><button>Quit</button></form></header>
 <main id=live>
 {f'<div class="card wide warn">{html.escape(msg)}</div>' if msg else ''}
+{f'<div class="card wide warn">{html.escape(STATUS["ftp_error"])}</div>' if STATUS["ftp_error"] else ''}
 {f'<div class="card wide warn">{parked} photo{"s" if parked != 1 else ""} (e.g. {html.escape(parked_name)}) couldn\'t upload because {"their shoot was" if parked != 1 else "its shoot was"} deleted on Darkroom. The originals are safe in your folder.</div>' if parked else ''}
 <div class=card><div class=lab>Shoot</div>{shoot}
 <form method=post action=/key class=row><input name=key placeholder="Shoot key" autocomplete=off><button class=p>Connect</button></form></div>
@@ -490,10 +505,26 @@ def already_running():
     except Exception:
         return False
 
+_LOCK = None
+def single_instance():
+    """True if this is the only bridge using this state folder (an OS lock: released when the process dies)."""
+    global _LOCK
+    import fcntl
+    _LOCK = open(STATE / "bridge.lock", "w")
+    try:
+        fcntl.flock(_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB); _LOCK.write(str(os.getpid())); _LOCK.flush(); return True
+    except OSError:
+        return False
+
 def main():
     url = f"http://localhost:{WEB_PORT}"
+    print(f"  start pid={os.getpid()} ppid={os.getppid()} argv={sys.argv[1:]}")
+    if not single_instance():
+        print("  Darkroom Bridge is already running:", url)
+        if APP and not os.environ.get("DARKROOM_NO_BROWSER"): webbrowser.open(url)
+        return
     if already_running():
-        if APP: webbrowser.open(url)
+        if APP and not os.environ.get("DARKROOM_NO_BROWSER"): webbrowser.open(url)
         print("  Darkroom Bridge is already running:", url); return
     if sys.platform == "darwin":  # keep the Mac awake while the bridge runs (lid open)
         try: subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
@@ -507,9 +538,12 @@ def main():
         shoot_dir(key_now())
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=sync_loop, daemon=True).start()
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", WEB_PORT), Local)
+    except OSError as e:
+        print(f"  ! Port {WEB_PORT} is used by another program ({e}). Quit it and open Darkroom Bridge again."); return
     threading.Thread(target=run_ftp, daemon=True).start()
     queue_waiting()
-    srv = ThreadingHTTPServer(("127.0.0.1", WEB_PORT), Local)
     ip, key = local_ip(), key_now()
     print(f"\n  ◉ Darkroom bridge v{VERSION}")
     print(f"    Shoot     {SETTINGS.get('titles', {}).get(key) or (key[:6] if key else 'none yet: connect one from the shoot Camera tab')}")
