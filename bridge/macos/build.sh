@@ -23,6 +23,14 @@ echo "binaries needing macOS 12+:"
 find "$APP" -type f \( -name "*.so" -o -name "*.dylib" -o -perm -111 \) | while read -r f; do
   v=$(otool -l "$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}'); [ -n "$v" ] && [ "${v%%.*}" -ge 12 ] && echo "  $v ${f#$APP/}"; done | sort -rV | head -25 || true
 ./smoke.sh "$APP"
+# Virus scan of the finished app (ClamAV, fresh signatures). Fails the build on any detection.
+brew install -q clamav >/dev/null 2>&1 || true
+CONF="$(brew --prefix)/etc/clamav"; [ -f "$CONF/freshclam.conf" ] || { cp "$CONF/freshclam.conf.sample" "$CONF/freshclam.conf"; sed -i '' 's/^Example/#Example/' "$CONF/freshclam.conf"; }
+freshclam --quiet || freshclam
+clamscan -r --infected --no-summary "$APP" && RC=0 || RC=$?
+clamscan -r "$APP" 2>/dev/null | grep -E "Known viruses|Scanned files|Infected files"
+[ $RC = 0 ] && echo "VIRUS SCAN: clean" || { echo "VIRUS SCAN: FAILED ($RC)"; exit 1; }
 mkdir -p dmg && rm -rf dmg/* && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
 hdiutil create -volname "Darkroom Bridge" -srcfolder dmg -ov -format UDZO "Darkroom-Bridge-$FLAVOR.dmg"
+shasum -a 256 "Darkroom-Bridge-$FLAVOR.dmg" | tee "Darkroom-Bridge-$FLAVOR.dmg.sha256"
 echo "built Darkroom-Bridge-$FLAVOR.dmg"

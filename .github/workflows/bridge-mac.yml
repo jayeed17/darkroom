@@ -35,6 +35,7 @@ jobs:
           name: ${{ matrix.flavor }}
           path: |
             bridge/macos/Darkroom-Bridge-*.dmg
+            bridge/macos/Darkroom-Bridge-*.sha256
             report-*.txt
   release:
     needs: build
