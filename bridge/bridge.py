@@ -64,6 +64,10 @@ def save_settings():
 if APP and not os.environ.get("DARKROOM_CONSOLE"):
     log_f = open(STATE / "bridge.log", "a", buffering=1, encoding="utf-8")
     sys.stdout = sys.stderr = log_f
+else:
+    for _s in (sys.stdout, sys.stderr):  # write log lines as they happen, even into a file
+        try: _s.reconfigure(line_buffering=True)
+        except Exception: pass
 
 if os.environ.get("DARKROOM_KEY", "").strip():
     SETTINGS["key"] = os.environ["DARKROOM_KEY"].strip()
