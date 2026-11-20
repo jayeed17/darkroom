@@ -682,16 +682,30 @@ function shareTab(body, state) {
 function bridgeTab(body, state) {
   const s = state.shoot;
   const cmd = `cd darkroom/bridge && ./start.sh ${s.ingest_key}`;
+  const DL = "https://github.com/jayeed17/darkroom/releases/latest/download/";
+  const connectUrl = `http://localhost:47474/connect?key=${encodeURIComponent(s.ingest_key)}`;
   body.replaceChildren(h(`<main><div class="wrap panel-grid">
-    <div class="card"><div class="label">Step 1 · on your Mac</div><h3 class="card-h">Start the camera bridge</h3>
-      <p class="muted">The bridge receives photos from your camera over Wi-Fi and develops them here. Run this in Terminal and leave it open while you shoot:</p>
-      <div class="code" id="cmd">${esc(cmd)}</div>
-      <div class="kv" style="margin-top:10px"><button class="btn" id="cpc">Copy command</button><button class="btn ghost" id="cpk">Copy shoot key</button></div>
-      <p class="muted" style="font-size:12.5px">First time? <code>git clone https://github.com/jayeed17/darkroom</code>. The terminal prints your Mac's IP for step 2.</p></div>
-    <div class="card"><div class="label">Step 2 · on the camera</div><h3 class="card-h">Sony FX3 · a7 IV · a7R V</h3>
+    <div class="card"><div class="label">Step 1 · on your Mac, once</div><h3 class="card-h">Install Darkroom Bridge</h3>
+      <p class="muted">A small menu-bar app that receives photos from your camera over Wi-Fi and develops them here. Originals stay on your Mac.</p>
+      <div class="kv" style="margin-top:10px"><a class="btn primary" href="${DL}Darkroom-Bridge-AppleSilicon.dmg">Download for Apple silicon</a>
+        <a class="btn" href="${DL}Darkroom-Bridge-Intel.dmg">Intel Mac</a></div>
+      <p class="muted" style="font-size:12.5px">Not sure which? Apple menu → About This Mac: “Chip Apple M…” means Apple silicon.</p>
+      <ol class="steps" style="font-size:13px">
+        <li>Open the download and drag <b>Darkroom Bridge</b> into <b>Applications</b>, then open it.</li>
+        <li>First time only: if macOS says it can't verify the app, open <b>System Settings → Privacy &amp; Security</b>, scroll down and click <b>Open Anyway</b>.</li>
+        <li>If asked to allow incoming connections or access the local network, click <b>Allow</b>. That's the camera.</li>
+      </ol></div>
+    <div class="card"><div class="label">Step 2 · each shoot</div><h3 class="card-h">Connect this Mac to “${esc(s.title)}”</h3>
+      <p class="muted">With Darkroom Bridge open (◉ in the menu bar), click Connect. Photos from your camera then land in this shoot.</p>
+      <div class="kv" style="margin-top:10px"><a class="btn primary" id="conn" href="${esc(connectUrl)}" target="_blank" rel="noopener">Connect this Mac</a>
+        <button class="btn ghost" id="cpk">Copy shoot key</button></div>
+      <p class="muted" style="font-size:12.5px">Nothing opens? Make sure Darkroom Bridge is running, or paste the shoot key into its panel.</p>
+      <details style="margin-top:8px"><summary class="muted" style="font-size:12.5px;cursor:pointer">Run from source instead (Terminal)</summary>
+        <div class="code" id="cmd" style="margin-top:8px">${esc(cmd)}</div><button class="btn ghost" id="cpc" style="margin-top:8px">Copy command</button></details></div>
+    <div class="card"><div class="label">Step 3 · on the camera</div><h3 class="card-h">Sony FX3 · a7 IV · a7R V</h3>
       <ol class="steps">
-        <li>Join the <b>same Wi-Fi</b> as your Mac. Guest networks and carrier hotspots usually block this; a travel router works everywhere.</li>
-        <li><b>Network → FTP Transfer Func. → Server Setting → Server 1</b>: Host = the IP the bridge printed, Port <b>2121</b>, User <b>sony</b>, Password <b>darkroom</b>, Secure Protocol <b>Off</b>, Passive <b>On</b></li>
+        <li>Join the <b>same Wi-Fi</b> as your Mac. Guest networks and phone hotspots usually block this; a travel router works everywhere.</li>
+        <li><b>Network → FTP Transfer Func. → Server Setting → Server 1</b>: Host = the address shown in the Darkroom Bridge panel, Port <b>2121</b>, User <b>sony</b>, Password <b>darkroom</b>, Secure Protocol <b>Off</b>, Passive <b>On</b></li>
         <li><b>FTP Function: On</b> · <b>Auto FTP Transfer: On</b> · Transfer Target: <b>JPEG</b></li>
         <li>Shoot. Photos develop in the <a href="#/s/${s.id}/gallery">Gallery</a> within seconds.</li>
       </ol></div>
