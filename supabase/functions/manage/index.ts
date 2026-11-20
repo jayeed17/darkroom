@@ -30,9 +30,16 @@ async function removeAll(paths: string[]) {
     if (error) throw error;
   }
 }
-const pathsFor = (shootId: string, name: string) => {
-  const stem = name.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.[^.]+$/, "");
-  return [`${shootId}/${stem}.thumb.jpg`, `${shootId}/${stem}.preview.jpg`];
+// The stored URLs say exactly where the files are (new files carry an unguessable code in their name);
+// the name-based paths cover photos uploaded before that.
+const pathsFor = (p: { shoot_id: string; name: string; thumb_url?: string | null; preview_url?: string | null }) => {
+  const stem = p.name.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.[^.]+$/, "");
+  const fromUrl = (u?: string | null) => {
+    const m = u && decodeURIComponent(u.split("?")[0]).match(/\/object\/public\/photos\/(.+)$/);
+    return m && m[1].startsWith(`${p.shoot_id}/`) ? m[1] : null;
+  };
+  const out = [fromUrl(p.thumb_url), fromUrl(p.preview_url), `${p.shoot_id}/${stem}.thumb.jpg`, `${p.shoot_id}/${stem}.preview.jpg`];
+  return [...new Set(out.filter(Boolean) as string[])];
 };
 
 Deno.serve(async (req) => {
@@ -48,11 +55,11 @@ Deno.serve(async (req) => {
   try {
     if (b.action === "delete_photo") {
       // two plain lookups (no embed): shoots<->photos has two foreign keys since cover_photo, so an embed is ambiguous
-      const { data: p, error: pe } = await admin.from("photos").select("id,name,shoot_id").eq("id", Number(b.photo_id)).maybeSingle();
+      const { data: p, error: pe } = await admin.from("photos").select("id,name,shoot_id,thumb_url,preview_url").eq("id", Number(b.photo_id)).maybeSingle();
       if (pe) throw pe;
       const { data: own } = p ? await admin.from("shoots").select("owner").eq("id", p.shoot_id).maybeSingle() : { data: null };
       if (!p || !own || own.owner !== uid) return json({ error: "not found" }, 404);
-      await removeAll(pathsFor(p.shoot_id, p.name));
+      await removeAll(pathsFor(p));
       { const { error } = await admin.from("photos").delete().eq("id", p.id); if (error) throw error; }
       return json({ ok: true });
     }

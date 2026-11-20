@@ -18,6 +18,13 @@ const json = (body: unknown, status = 200) =>
 
 const safe = (name: string) => name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
 const stem = (name: string) => safe(name).replace(/\.[^.]+$/, "");
+// Files live in a public bucket, so their addresses must not be guessable: a client who can see
+// DSC00012 in the proofing gallery must not be able to open the hidden DSC00013. The code is derived
+// from the shoot's secret ingest key, so prepare and commit agree without storing anything.
+async function tag(key: string, s: string) {
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${key}:${s}`)));
+  return [...d.slice(0, 10)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -35,7 +42,7 @@ Deno.serve(async (req) => {
 
   const name = safe(String(b.name ?? ""));
   if (!name) return json({ error: "name required" }, 400);
-  const base = `${shoot.id}/${stem(name)}`;
+  const base = `${shoot.id}/${stem(name)}.${await tag(key, stem(name))}`;
   const paths = { thumb: `${base}.thumb.jpg`, preview: `${base}.preview.jpg` };
 
   if (b.action === "prepare") {
