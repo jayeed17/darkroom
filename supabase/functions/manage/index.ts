@@ -2,6 +2,8 @@
 //   {action:"delete_photo", photo_id}
 //   {action:"delete_shoot", shoot_id}
 //   {action:"sweep_orphans"}   removes stored files whose shoot no longer exists
+//   {action:"delete_account"}  removes every file of the user's shoots, then the user (shoots, photos,
+//                              comments and profile go with it through ON DELETE CASCADE)
 // Requires the signed-in user's JWT; ownership is checked before anything is removed.
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -69,6 +71,14 @@ Deno.serve(async (req) => {
       await removeAll(await listAll(s.id));
       { const { error } = await admin.from("shoots").delete().eq("id", s.id); if (error) throw error; }
       return json({ ok: true });
+    }
+    if (b.action === "delete_account") {
+      const { data: shoots, error: se } = await admin.from("shoots").select("id").eq("owner", uid);
+      if (se) throw se;
+      for (const s of shoots || []) await removeAll(await listAll(s.id));
+      const { error } = await admin.auth.admin.deleteUser(uid);
+      if (error) throw error;
+      return json({ ok: true, shoots: (shoots || []).length });
     }
     if (b.action === "sweep_orphans") {
       const { data: top, error } = await admin.storage.from(BUCKET).list("", { limit: 1000 });

@@ -85,6 +85,7 @@ async function route() {
   if (!session) { PROFILE = null; return authView(); }
   if (BOOT.type === "signup" && !route.welcomed) { route.welcomed = true; toast("Email confirmed. Welcome to Darkroom!"); }
   if (a === "s" && b) return shootView(b, c || "gallery");
+  if (a === "account") return accountView(session);
   return homeView(session);
 }
 addEventListener("hashchange", route);
@@ -236,7 +237,7 @@ async function homeView(session) {
   lset("darkroom:seen:" + session.user.id, "1");
   app.replaceChildren(h(`<div>
     <header class="top"><a class="brand" href="#/">${LOGO} Darkroom</a><span class="sp"></span>
-      <span class="crumb" id="who">${esc(profile.full_name || session.user.email)}</span><button class="btn ghost small" id="out">Sign out</button></header>
+      <a class="crumb acct-link" id="who" href="#/account" title="Account settings">${esc(profile.full_name || session.user.email)} · Account</a><button class="btn ghost small" id="out">Sign out</button></header>
     <section class="hero">
       <div class="hero-text">
         <div class="label">${esc(greeting())}</div>
@@ -309,7 +310,7 @@ async function shootView(id, tab) {
   app.replaceChildren(h(`<div>
     <header class="top"><a class="brand" href="#/">${LOGO}</a><span class="crumb"><a href="#/" style="text-decoration:none">Shoots</a> /</span>
       <input class="title-in" id="title" value="${esc(shoot.title)}" aria-label="Shoot name"><span class="sp"></span>
-      <span class="live" id="live"><span class="dot"></span><span id="liveTxt">connecting</span></span></header>
+      <span class="live" id="live"><span class="dot"></span><span id="liveTxt">connecting</span></span><a class="btn ghost small" href="#/account">Account</a></header>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/s/${id}/${k}" ${k === tab ? 'aria-current="page"' : ""}>${l}</a>`).join("")}</nav>
     <div id="body"></div></div>`));
   $("#title").onchange = async (e) => {
@@ -680,6 +681,129 @@ function shareTab(body, state) {
   return paint;
 }
 
+// ---------------------------------------------------------------- account settings
+async function accountView(session) {
+  const gen = ROUTE;
+  const user = session.user;
+  const [profile, counts] = await Promise.all([
+    loadProfile(user),
+    Promise.all([sb.from("shoots").select("id", { count: "exact", head: true }), sb.from("photos").select("id", { count: "exact", head: true })]),
+  ]);
+  if (stale(gen)) return;
+  const [nShoots, nPhotos] = counts.map((r) => r.count ?? 0);
+  const cam = stepsFor(camChoice(user.id));
+  const since = new Date(user.created_at).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const DL = "https://github.com/jayeed17/darkroom/releases/latest/download/";
+  app.replaceChildren(h(`<div>
+    <header class="top"><a class="brand" href="#/">${LOGO} Darkroom</a><span class="crumb"><a href="#/" style="text-decoration:none">Shoots</a> / Account</span><span class="sp"></span>
+      <button class="btn ghost small" id="out">Sign out</button></header>
+    <main><div class="wrap acct">
+      <div class="bar"><div><div class="label">Settings</div><h1 class="h1">Account</h1></div></div>
+      <p class="muted" style="margin-top:-8px">Member since ${esc(since)} · ${nShoots} shoot${nShoots === 1 ? "" : "s"} · ${nPhotos} photo${nPhotos === 1 ? "" : "s"}</p>
+      <div class="panel-grid">
+        <form class="card" id="fProfile"><div class="label">Profile</div><h3 class="card-h">Your details</h3>
+          <label class="fl">Full name<input class="input" name="name" maxlength="120" autocomplete="name" required value="${esc(profile.full_name || "")}"></label>
+          <label class="fl">Phone<input class="input" name="phone" type="tel" maxlength="40" autocomplete="tel" value="${esc(profile.phone || "")}"></label>
+          <div class="kv" style="margin-top:12px"><button class="btn primary">Save details</button></div></form>
+
+        <form class="card" id="fEmail"><div class="label">Sign-in email</div><h3 class="card-h">Email</h3>
+          <p class="muted">You sign in with <b>${esc(user.email)}</b>.</p>
+          <label class="fl">New email<input class="input" name="email" type="email" autocomplete="email" required></label>
+          <div class="kv" style="margin-top:12px"><button class="btn">Change email</button></div>
+          <p class="muted" style="font-size:12.5px">We'll email a confirmation link to the new address. The change takes effect once you open it.</p></form>
+
+        <form class="card" id="fPw"><div class="label">Security</div><h3 class="card-h">Password</h3>
+          <label class="fl">Current password<span class="pw"><input class="input" name="cur" type="password" autocomplete="current-password" required>${EYE}</span></label>
+          <label class="fl">New password<span class="pw"><input class="input" name="pw" type="password" autocomplete="new-password" minlength="8" required>${EYE}</span></label>
+          <label class="fl">Repeat new password<span class="pw"><input class="input" name="pw2" type="password" autocomplete="new-password" minlength="8" required>${EYE}</span></label>
+          <div class="kv" style="margin-top:12px"><button class="btn">Change password</button></div></form>
+
+        <div class="card"><div class="label">Camera</div><h3 class="card-h">${esc(cam ? cam.title : "Not set")}</h3>
+          <p class="muted">${cam ? (cam.method === "ftp" ? "Sends photos over Wi-Fi to Darkroom Bridge." : "Works through the bridge's hot folder with its tethering app.") : "Tell us your camera and every shoot's Camera tab shows the exact steps."}</p>
+          <div class="kv" style="margin-top:10px"><button class="btn" id="camChange">${cam ? "Change camera" : "Choose camera"}</button></div>
+          <p class="muted" style="font-size:12.5px;margin-top:14px">Darkroom Bridge for Mac: <a href="${DL}Darkroom-Bridge-AppleSilicon.dmg">Apple silicon</a> · <a href="${DL}Darkroom-Bridge-Intel.dmg">Intel</a></p></div>
+
+        <form class="card danger-card" id="fDel"><div class="label">Danger zone</div><h3 class="card-h">Delete account</h3>
+          <p class="muted">Permanently deletes your account, all ${nShoots} shoot${nShoots === 1 ? "" : "s"}, every photo, client link and album from Darkroom. Originals on your computer are not touched.</p>
+          <label class="fl">Type DELETE to confirm<input class="input" name="confirm" autocomplete="off"></label>
+          <label class="fl">Your password<span class="pw"><input class="input" name="pw" type="password" autocomplete="current-password">${EYE}</span></label>
+          <div class="kv" style="margin-top:12px"><button class="btn danger" id="delBtn">Delete my account…</button></div></form>
+      </div></div></main></div>`));
+  wireEyes(app);
+  $("#out").onclick = () => sb.auth.signOut();
+  $("#camChange").onclick = () => openCameraPicker(camKey(user.id), camChoice(user.id), () => { toast("Camera saved"); route(); });
+  const busy = (f, on, label) => { const b = f.querySelector("button"); b.disabled = on; if (label) b.textContent = label; };
+  // the current password proves it's really you before sensitive changes
+  const verify = async (pw) => !(await sb.auth.signInWithPassword({ email: user.email, password: pw })).error;
+
+  $("#fProfile").onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target;
+    const full_name = f.name.value.trim().replace(/\s+/g, " "), phone = f.phone.value.trim();
+    if (full_name.length < 2) return toast("Please enter your full name");
+    busy(f, true);
+    const { error } = await sb.from("profiles").upsert({ id: user.id, full_name, phone: phone || null });
+    if (!error) await sb.auth.updateUser({ data: { full_name, phone } });
+    busy(f, false);
+    if (error) return toast(friendly(error));
+    PROFILE = { ...profile, full_name, phone }; toast("Details saved");
+  };
+  $("#fEmail").onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target; const email = f.email.value.trim().toLowerCase();
+    if (email === user.email) return toast("That's already your email");
+    busy(f, true);
+    const { error } = await sb.auth.updateUser({ email }, { emailRedirectTo: location.origin + "/" });
+    busy(f, false);
+    if (error) return toast(friendly(error));
+    f.reset(); toast(`Check ${email} for a confirmation link`);
+  };
+  $("#fPw").onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target;
+    if (f.pw.value !== f.pw2.value) return toast("The new passwords don't match");
+    busy(f, true);
+    if (!(await verify(f.cur.value))) { busy(f, false); return toast("Your current password isn't right"); }
+    const { error } = await sb.auth.updateUser({ password: f.pw.value });
+    busy(f, false);
+    if (error) return toast(friendly(error));
+    f.reset(); toast("Password changed");
+  };
+  $("#fDel").onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target;
+    if (f.confirm.value.trim() !== "DELETE") return toast("Type DELETE to confirm");
+    if (!(await verify(f.pw.value))) return toast("Your password isn't right");
+    if (!confirm("Delete your Darkroom account and everything in it? This can't be undone.")) return;
+    busy(f, true, "Deleting…");
+    try { await manage({ action: "delete_account" }); } catch (err) { busy(f, false, "Delete my account…"); return toast("Couldn't delete: " + err.message); }
+    await sb.auth.signOut(); toast("Your account was deleted");
+  };
+}
+
+// "Which camera?" dialog, shared by the Camera tab and the Account page. Remembered per account on this browser.
+const camKey = (uid) => "darkroom:camera:" + (uid || "me");
+const camChoice = (uid) => { try { return JSON.parse(lget(camKey(uid)) || "null"); } catch { return null; } };
+function openCameraPicker(key, choice, onSave) {
+  const close = () => { document.querySelector(".cam-pick")?.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  close();
+  const el = h(pickerHtml(choice, esc));
+  document.body.append(el);
+  document.addEventListener("keydown", onKey);
+  onLeave(close);
+  const brand = el.querySelector("#camBrand"), model = el.querySelector("#camModel"), save = el.querySelector("#camSave");
+  brand.onchange = () => {
+    const ms = BRANDS[brand.value]?.models || [];
+    model.innerHTML = ms.map((m) => `<option>${esc(m)}</option>`).join("") + `<option value="_other">Other model</option>`;
+    el.querySelector("#camModelL").hidden = !ms.length;
+    save.disabled = !brand.value;
+  };
+  save.onclick = () => {
+    const c = { brand: brand.value, model: BRANDS[brand.value]?.models.length ? model.value : "" };
+    lset(key, JSON.stringify(c)); close(); onSave(c);
+  };
+  el.querySelector("#camSkip").onclick = () => { lset(key + ":asked", "1"); close(); };
+  el.onclick = (e) => { if (e.target === el) close(); };
+  brand.focus();
+}
+
 function bridgeTab(body, state) {
   const s = state.shoot;
   const cmd = `cd darkroom/bridge && ./start.sh ${s.ingest_key}`;
@@ -720,9 +844,8 @@ function bridgeTab(body, state) {
   $("#cpk").onclick = () => copy(s.ingest_key);
 
   // Step 3 depends on the camera: ask once, remember per account on this browser.
-  const CAM_K = "darkroom:camera:" + (AUTH_UID || "me");
-  let choice = null;
-  try { choice = JSON.parse(lget(CAM_K) || "null"); } catch {}
+  const CAM_K = camKey(AUTH_UID);
+  let choice = camChoice(AUTH_UID);
   const paintCam = () => {
     const card = $("#camCard"); if (!card) return;
     const info = stepsFor(choice);
@@ -737,30 +860,8 @@ function bridgeTab(body, state) {
          <button class="btn primary" id="camChange">Choose your camera</button>`;
     $("#camChange").onclick = openPicker;
   };
-  const closePicker = () => { document.querySelector(".cam-pick")?.remove(); document.removeEventListener("keydown", onKey); };
-  const onKey = (e) => { if (e.key === "Escape") closePicker(); };
-  function openPicker() {
-    closePicker();
-    const el = h(pickerHtml(choice, esc));
-    document.body.append(el);
-    document.addEventListener("keydown", onKey);
-    const brand = el.querySelector("#camBrand"), model = el.querySelector("#camModel"), save = el.querySelector("#camSave");
-    brand.onchange = () => {
-      const ms = BRANDS[brand.value]?.models || [];
-      model.innerHTML = ms.map((m) => `<option>${esc(m)}</option>`).join("") + `<option value="_other">Other model</option>`;
-      el.querySelector("#camModelL").hidden = !ms.length;
-      save.disabled = !brand.value;
-    };
-    save.onclick = () => {
-      choice = { brand: brand.value, model: BRANDS[brand.value]?.models.length ? model.value : "" };
-      lset(CAM_K, JSON.stringify(choice)); closePicker(); paintCam();
-    };
-    el.querySelector("#camSkip").onclick = () => { lset(CAM_K + ":asked", "1"); closePicker(); };
-    el.onclick = (e) => { if (e.target === el) closePicker(); };
-    brand.focus();
-  }
+  const openPicker = () => openCameraPicker(CAM_K, choice, (c) => { choice = c; paintCam(); });
   paintCam();
-  onLeave(closePicker);
   if (!choice && !lget(CAM_K + ":asked")) { lset(CAM_K + ":asked", "1"); openPicker(); }
   return () => {};  // re-render hook: nothing on this tab depends on live photo data
 }

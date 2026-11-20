@@ -266,3 +266,8 @@ input[type=date].input{color-scheme:dark}
 .cam-l{display:block;margin-top:12px;font-size:12.5px;color:var(--mute)}
 .cam-l .select{display:block;width:100%;margin-top:4px}
 
+
+/* account */
+.acct-link{text-decoration:none;color:var(--mute)}.acct-link:hover{color:var(--ink)}
+.fl{display:block;margin-top:10px;font-size:12.5px;color:var(--mute)}
+.fl .input,.fl .pw{display:block;margin-top:4px}
