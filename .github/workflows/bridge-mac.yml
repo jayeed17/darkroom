@@ -48,9 +48,12 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           V=$(grep -oP 'VERSION = "\K[^"]+' bridge/bridge.py)
+          find out -mindepth 2 -type f -exec mv {} out/ \; 2>/dev/null || true
+          find out -mindepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
           ls -la out
           OK=$([ -f out/Darkroom-Bridge-AppleSilicon.dmg ] && [ -f out/Darkroom-Bridge-Intel.dmg ] && echo yes || echo no)
           if [ "$OK" = yes ]; then TAG="bridge-v$V"; FLAGS="--latest"; else TAG="bridge-build-failed"; FLAGS="--prerelease"; fi
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" $FLAGS --title "Darkroom Bridge $V" \
             --notes "Mac app that receives photos from your Sony camera over Wi-Fi. Download the Apple silicon (M1–M4) or Intel version." --target "$GITHUB_SHA"
           gh release upload "$TAG" out/* --clobber
+          if [ "$OK" = yes ]; then gh release delete bridge-build-failed --cleanup-tag -y 2>/dev/null || true; fi
