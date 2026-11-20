@@ -34,3 +34,8 @@ which has no `index.html`, and the site returns 404.
 
 ## 6. Custom domain (recommended)
 Vercel → project → Settings → Domains → add e.g. `gallery.<client-domain>`, add the DNS record it shows, then repeat step 2 with the new domain.
+
+## 7. Security switches (dashboard)
+- Supabase → Authentication → **Attack Protection** (Passwords): turn on **Leaked password protection**
+  (rejects passwords found in known breaches). Requires the Pro plan.
+- For the beta only: Authentication → Sign In / Providers → Email → **Confirm email** off until custom SMTP (step 1) is set up.
