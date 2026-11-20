@@ -28,7 +28,9 @@ Supabase → Authentication → **Email Templates**
 - Vercel: make sure the team is on **Pro**. Hobby is for non-commercial use only.
 
 ## 5. Auto-deploys
-Vercel → project `darkroom` → Settings → **Git** → connect `jayeed17/darkroom`, root directory `web`. After this, every push to `main` deploys.
+Done: `jayeed17/darkroom` is connected and every push to `main` deploys to production.
+Keep **Settings → Build & Deployment → Root Directory = `web`**. If it is ever cleared, deploys serve the repo root,
+which has no `index.html`, and the site returns 404.
 
 ## 6. Custom domain (recommended)
 Vercel → project → Settings → Domains → add e.g. `gallery.<client-domain>`, add the DNS record it shows, then repeat step 2 with the new domain.
