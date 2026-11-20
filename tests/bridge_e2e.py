@@ -30,7 +30,7 @@ lib = Path(tempfile.mkdtemp(prefix=f"dr{ROUND}_", dir=os.environ.get("TEST_TMP")
 KEY = "testkey" + ROUND * 17
 KID = KEY[:10]
 env = {**os.environ, "DARKROOM_API": "http://127.0.0.1:9", "DARKROOM_LIBRARY": str(lib), "DARKROOM_KEY": "testkey" + ROUND * 17,
-       "DARKROOM_FTP_PORT": str(FTP_PORT), "DARKROOM_WEB_PORT": str(WEB_PORT), "PYTHONUNBUFFERED": "1"}
+       "DARKROOM_FTP_PORT": str(FTP_PORT), "DARKROOM_FTP_PORT2": str(FTP_PORT + 200), "DARKROOM_FTP_USER": "sony", "DARKROOM_FTP_PASS": "darkroom", "DARKROOM_WEB_PORT": str(WEB_PORT), "PYTHONUNBUFFERED": "1"}
 def start():
     p = subprocess.Popen([sys.executable, str(BRIDGE)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for _ in range(60):

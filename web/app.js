@@ -1,7 +1,8 @@
-import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/+esm";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 import { LAYOUTS, SIZES, autoLayout, exportPdf } from "./album.js";
 import { pickQuote, prints3d, quoteEl, greeting } from "./welcome.js";
+import { BRANDS, stepsFor, pickerHtml } from "./cameras.js";
 
 // Email links (confirm signup / reset password) land as #access_token=…&type=… or #error=…
 const BOOT_HASH = location.hash;
@@ -113,7 +114,7 @@ function authShell(inner) {
     <div class="auth-box">
       <a class="brand" href="#/">${LOGO} Darkroom</a>
       <h1>Shoot.<br>Watch it develop.</h1>
-      <p class="lede">Your Sony sends every frame here as you shoot. Cull, share a proofing link, and design the album in one place.</p>
+      <p class="lede">Your camera sends every frame here as you shoot. Cull, share a proofing link, and design the album in one place.</p>
       ${inner}</div></div>`);
   const stage = prints3d([], { count: 12 });
   el.querySelector(".art-slot").append(stage);
@@ -461,7 +462,7 @@ function galleryTab(body, state) {
     state.fresh?.clear();
     const all = [...state.photos.values()];
     $("#cnt").textContent = `${all.length} shots · ${all.filter((p) => p.star).length} ★ · ${all.filter((p) => p.pick).length} ♥ · ${all.filter((p) => p.blurry || p.dup_of).length} flagged`;
-    $("#empty").innerHTML = all.length ? "" : `<div class="empty"><h2>Waiting for your camera</h2><p>Open the <a href="#/s/${state.shoot.id}/bridge">Camera</a> tab to connect your Sony. Photos develop here the moment you take them.</p></div>`;
+    $("#empty").innerHTML = all.length ? "" : `<div class="empty"><h2>Waiting for your camera</h2><p>Open the <a href="#/s/${state.shoot.id}/bridge">Camera</a> tab to connect your camera. Photos develop here the moment you take them.</p></div>`;
   };
   async function toggleStar(p) {
     if (!p) return;
@@ -702,13 +703,7 @@ function bridgeTab(body, state) {
       <p class="muted" style="font-size:12.5px">Nothing opens? Make sure Darkroom Bridge is running, or paste the shoot key into its panel.</p>
       <details style="margin-top:8px"><summary class="muted" style="font-size:12.5px;cursor:pointer">Run from source instead (Terminal)</summary>
         <div class="code" id="cmd" style="margin-top:8px">${esc(cmd)}</div><button class="btn ghost" id="cpc" style="margin-top:8px">Copy command</button></details></div>
-    <div class="card"><div class="label">Step 3 · on the camera</div><h3 class="card-h">Sony FX3 · a7 IV · a7R V</h3>
-      <ol class="steps">
-        <li>Join the <b>same Wi-Fi</b> as your Mac. Guest networks and phone hotspots usually block this; a travel router works everywhere.</li>
-        <li><b>Network → FTP Transfer Func. → Server Setting → Server 1</b>: Host = the address shown in the Darkroom Bridge panel, Port <b>2121</b>, User <b>sony</b>, Password <b>darkroom</b>, Secure Protocol <b>Off</b>, Passive <b>On</b></li>
-        <li><b>FTP Function: On</b> · <b>Auto FTP Transfer: On</b> · Transfer Target: <b>JPEG</b></li>
-        <li>Shoot. Photos develop in the <a href="#/s/${s.id}/gallery">Gallery</a> within seconds.</li>
-      </ol></div>
+    <div class="card" id="camCard"></div>
     <div class="card danger-card"><div class="label">Danger zone</div><h3 class="card-h">Delete this shoot</h3>
       <p class="muted">Removes every photo, comment, the album and the client link from Darkroom. Originals on your computer are not touched.</p>
       <button class="btn danger" id="delShoot">Delete shoot…</button></div>
@@ -723,7 +718,50 @@ function bridgeTab(body, state) {
   };
   $("#cpc").onclick = () => copy(cmd);
   $("#cpk").onclick = () => copy(s.ingest_key);
-  return () => {};
+
+  // Step 3 depends on the camera: ask once, remember per account on this browser.
+  const CAM_K = "darkroom:camera:" + (AUTH_UID || "me");
+  let choice = null;
+  try { choice = JSON.parse(lget(CAM_K) || "null"); } catch {}
+  const paintCam = () => {
+    const card = $("#camCard"); if (!card) return;
+    const info = stepsFor(choice);
+    const wifi = `<li>Join the <b>same Wi-Fi</b> as your Mac. Guest networks and phone hotspots usually block this; a travel router works everywhere.</li>`;
+    const done = `<li>Shoot. Photos develop in the <a href="#/s/${s.id}/gallery">Gallery</a> within seconds.</li>`;
+    card.innerHTML = info
+      ? `<div class="label">Step 3 · on the camera</div><div class="bar" style="margin:0"><h3 class="card-h" style="margin:0">${esc(info.title)}</h3><span class="sp"></span><button class="btn ghost" id="camChange">Change camera</button></div>
+         <ol class="steps" style="margin-top:10px">${info.method === "ftp" ? wifi : ""}${info.steps.map((x) => `<li>${x}</li>`).join("")}${done}</ol>
+         ${info.note ? `<p class="muted" style="font-size:12.5px">${esc(info.note)}</p>` : ""}`
+      : `<div class="label">Step 3 · on the camera</div><h3 class="card-h">Set up your camera</h3>
+         <p class="muted">Sony, Canon, Nikon and Fujifilm bodies with FTP send photos over Wi-Fi. Any other camera works by shooting tethered into a folder the bridge watches.</p>
+         <button class="btn primary" id="camChange">Choose your camera</button>`;
+    $("#camChange").onclick = openPicker;
+  };
+  const closePicker = () => { document.querySelector(".cam-pick")?.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") closePicker(); };
+  function openPicker() {
+    closePicker();
+    const el = h(pickerHtml(choice, esc));
+    document.body.append(el);
+    document.addEventListener("keydown", onKey);
+    const brand = el.querySelector("#camBrand"), model = el.querySelector("#camModel"), save = el.querySelector("#camSave");
+    brand.onchange = () => {
+      const ms = BRANDS[brand.value]?.models || [];
+      model.innerHTML = ms.map((m) => `<option>${esc(m)}</option>`).join("") + `<option value="_other">Other model</option>`;
+      el.querySelector("#camModelL").hidden = !ms.length;
+      save.disabled = !brand.value;
+    };
+    save.onclick = () => {
+      choice = { brand: brand.value, model: BRANDS[brand.value]?.models.length ? model.value : "" };
+      lset(CAM_K, JSON.stringify(choice)); closePicker(); paintCam();
+    };
+    el.querySelector("#camSkip").onclick = () => { lset(CAM_K + ":asked", "1"); closePicker(); };
+    el.onclick = (e) => { if (e.target === el) closePicker(); };
+    brand.focus();
+  }
+  paintCam();
+  if (!choice && !lget(CAM_K + ":asked")) { lset(CAM_K + ":asked", "1"); openPicker(); }
+  return () => closePicker();
 }
 
 function albumTab(body, state) {
