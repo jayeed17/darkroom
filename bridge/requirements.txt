@@ -1,5 +1,5 @@
 pyftpdlib>=1.5.9
 pillow>=10.0
 numpy>=1.26
-rawpy>=0.21
+rawpy>=0.21,<0.26  # 0.26+ has no prebuilt Intel-Mac wheel (source builds need macOS 15)
 pillow-heif>=0.16
