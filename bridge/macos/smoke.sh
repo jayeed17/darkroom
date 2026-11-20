@@ -13,5 +13,10 @@ curl -fs http://127.0.0.1:47999/ | grep -o "[0-9]* photos<span>received" || true
 ls -R "$T/lib" | head
 test -n "$(find "$T/lib" -name DSC00001.JPG)" && echo "SMOKE: photo received and filed: ok" || { echo "SMOKE FAILED"; cat "$T/out.log"; kill $PID; exit 1; }
 test -n "$(find "$T/state/.cache" -name 'DSC00001.thumb.jpg')" && echo "SMOKE: thumbnail developed: ok" || { echo "SMOKE FAILED (no thumbnail)"; cat "$T/out.log"; kill $PID; exit 1; }
+echo "processes:"; ps -axo pid,ppid,command | grep -i "darkroom bridge" | grep -v grep || true
+N=$(grep -c "start pid=" "$T/out.log" || true); echo "bridge starts: $N"; grep "start pid=" "$T/out.log" | head
+"$APP/Contents/MacOS/Darkroom Bridge" >> "$T/out.log" 2>&1; echo "second launch exit: $?"
+grep -q "already running" "$T/out.log" && echo "SMOKE: second launch detected the running one: ok"
+[ "$N" = 1 ] || { echo "SMOKE FAILED: bridge started $N times"; cat "$T/out.log"; kill $PID; exit 1; }
 grep -q Traceback "$T/out.log" && { echo "SMOKE: traceback in log"; cat "$T/out.log"; kill $PID; exit 1; } || true
 kill $PID; echo "SMOKE: ok"
