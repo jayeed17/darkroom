@@ -67,6 +67,7 @@ ROOT.mkdir(parents=True, exist_ok=True)
 INBOX, CACHE = STATE / "inbox", STATE / ".cache"
 for d in (INBOX, CACHE):
     d.mkdir(parents=True, exist_ok=True)
+INBOX = INBOX.resolve()  # the FTP server reports real paths (macOS: /var -> /private/var)
 
 STATUS = {"online": None, "last_camera": None, "last_file": None}
 
@@ -221,13 +222,15 @@ def file_in(path: Path, key: str):
     """Move a received file from the FTP inbox into the shoot's folder, then develop it."""
     if not key:
         return  # no shoot connected: it waits in the inbox and is assigned when one is
+    path = path.resolve()
     try:
         rel = path.relative_to(INBOX)
-        dest = shoot_dir(key) / rel
+    except ValueError:
+        rel = Path(path.name)
+    dest = shoot_dir(key) / rel
+    if dest != path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(dest))
-    except ValueError:
-        dest = path
     ingest(dest, key)
 
 def ingest(path: Path, key: str):

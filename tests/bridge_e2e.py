@@ -26,7 +26,7 @@ def jpeg(img, model="ILCE-7M4", dt="2026:11:19 10:00:00"):
     ex = Image.Exif(); ex[272] = model; ex[306] = dt
     b = io.BytesIO(); img.save(b, "JPEG", quality=92, exif=ex); return b.getvalue()
 
-lib = Path(tempfile.mkdtemp(prefix=f"dr{ROUND}_"))
+lib = Path(tempfile.mkdtemp(prefix=f"dr{ROUND}_", dir=os.environ.get("TEST_TMP")))
 KEY = "testkey" + ROUND * 17
 KID = KEY[:10]
 env = {**os.environ, "DARKROOM_LIBRARY": str(lib), "DARKROOM_KEY": "testkey" + ROUND * 17,
