@@ -50,7 +50,11 @@ const friendly = (error) => {
   if (error?.code === "same_password" || m.includes("different from the old")) return "Your new password must be different from your current one.";
   if (error?.code === "weak_password") return "That password is too easy to guess or has appeared in a data breach. Please choose a stronger one.";
   if (m.includes("password should")) return error.message;
-  if (m.includes("expired") || m.includes("invalid")) return "That link has expired or was already used. Request a new one below.";
+  if (error?.code === "email_address_invalid") return "That email address isn't valid. Check it for typos.";
+  if (error?.code === "email_exists" || m.includes("already been registered")) return "Another account already uses that email.";
+  if (error?.code === "email_address_not_authorized") return "We can't send email to that address yet (email delivery is still being set up). Please try again later.";
+  if (error?.code === "otp_expired" || m.includes("link is invalid") || m.includes("token has expired") || (m.includes("expired") && m.includes("link")))
+    return "That link has expired or was already used. Request a new one below.";
   if (m.includes("fetch") || m.includes("network")) return "Can't reach the server. Check your connection and try again.";
   return error?.message || "Something went wrong. Please try again.";
 };
