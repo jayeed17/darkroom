@@ -23,7 +23,7 @@ jobs:
         run: |
           set -o pipefail
           python3 -m pip install -q -r bridge/requirements.txt
-          { python3 tests/bridge_e2e.py bridge/bridge.py 1 && NO_PROXY=127.0.0.1 python3 tests/bridge_online.py bridge/bridge.py 1; } 2>&1 | tee report-${{ matrix.flavor }}.txt
+          { python3 tests/bridge_e2e.py bridge/bridge.py 1 && python3 tests/bridge_brands.py bridge/bridge.py 1 && NO_PROXY=127.0.0.1 python3 tests/bridge_online.py bridge/bridge.py 1; } 2>&1 | tee report-${{ matrix.flavor }}.txt
           ! grep -q "^FAIL" report-${{ matrix.flavor }}.txt
       - name: Build app + dmg
         run: |

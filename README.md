@@ -6,7 +6,7 @@ Darkroom is a minimal, open-source alternative to tools like Zno and Pixieset fo
 
 | | |
 |---|---|
-| **Live ingest** | Sony FX3 / a7 IV / a7R V push each shot over Wi-Fi FTP to the bridge on your laptop, which develops it into the cloud gallery within seconds. |
+| **Live ingest** | Any camera with built-in FTP (Sony α/FX, Canon EOS R/1D X III/5D IV, Nikon Z9/Z8/Z6III/Z5II/Zf, Fujifilm X-H2/X-H2S/GFX100 II) pushes each shot over Wi-Fi to the bridge on your Mac. Other cameras (Panasonic, Hasselblad, Leica, OM System…) work through a hot folder fed by their tethering app. |
 | **Smart cull** | Exposure-independent blur detection (dark-but-sharp frames aren't flagged) and near-duplicate detection. Star your keepers. |
 | **Client proofing** | One link, no client accounts. Cinematic cover photo, ♥ favorites, comments, "Send my selection". Optional gallery password, expiry date, watermark and downloads. |
 | **Studio touches** | 3D welcome with a new photography quote every visit, personal greeting, "Just developed" arrival cards, slideshow, copy picks straight into a Lightroom filename filter. |

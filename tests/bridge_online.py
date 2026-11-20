@@ -25,7 +25,7 @@ class Fake(BaseHTTPRequestHandler):
 threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", API), Fake).serve_forever, daemon=True).start()
 lib = Path(tempfile.mkdtemp(prefix=f"dron{ROUND}_"))
 env = {**os.environ, "DARKROOM_API": f"http://127.0.0.1:{API}", "DARKROOM_LIBRARY": str(lib), "DARKROOM_KEY": "a" * 24,
-       "DARKROOM_FTP_PORT": str(FTP_PORT), "DARKROOM_WEB_PORT": str(WEB_PORT), "PYTHONUNBUFFERED": "1",
+       "DARKROOM_FTP_PORT": str(FTP_PORT), "DARKROOM_FTP_PORT2": "0", "DARKROOM_FTP_USER": "sony", "DARKROOM_FTP_PASS": "darkroom", "DARKROOM_WEB_PORT": str(WEB_PORT), "PYTHONUNBUFFERED": "1",
        "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
 p = subprocess.Popen([sys.executable, str(BRIDGE)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 for _ in range(60):

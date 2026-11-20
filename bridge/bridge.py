@@ -31,21 +31,22 @@ from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 FROZEN = getattr(sys, "frozen", False)
 APP = FROZEN or os.environ.get("DARKROOM_APP") == "1"
 HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 CFG = json.loads((HERE / "config.json").read_text())
 if os.environ.get("DARKROOM_API"): CFG["supabase_url"] = os.environ["DARKROOM_API"]  # tests only
 
-FTP_USER = os.environ.get("DARKROOM_FTP_USER", "sony")
-FTP_PASS = os.environ.get("DARKROOM_FTP_PASS", "darkroom")
 FTP_PORT = int(os.environ.get("DARKROOM_FTP_PORT", 2121))
+FTP_PORT2 = int(os.environ.get("DARKROOM_FTP_PORT2", 21))   # also listen on the standard port (cameras that can't change it)
 WEB_PORT = int(os.environ.get("DARKROOM_WEB_PORT", 47474))
 BLUR_THRESHOLD = float(os.environ.get("DARKROOM_BLUR", 11))
 DUP_DISTANCE = 6
 IMG_EXT = {".jpg", ".jpeg", ".png", ".heif", ".hif", ".heic"}
-RAW_EXT = {".arw", ".dng"}
+RAW_EXT = {".arw", ".srf", ".sr2", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf", ".rw2", ".orf", ".dng",
+           ".3fr", ".fff", ".iiq", ".pef", ".srw", ".x3f", ".rwl", ".erf", ".mos"}
+TEMP_SUFFIXES = (".tmp", ".part", ".partial", ".filepart", ".crdownload", ".~tmp")
 
 # App: state in Application Support, photos in ~/Pictures/Darkroom. Source: everything in the library folder.
 if APP:
@@ -58,6 +59,7 @@ try:
     SETTINGS = json.loads(SETTINGS_F.read_text())
 except Exception:
     SETTINGS = {}
+_SAVED_BEFORE = dict(SETTINGS)  # as saved by a previous run, before this launch's overrides
 def save_settings():
     tmp = SETTINGS_F.with_suffix(".tmp"); tmp.write_text(json.dumps(SETTINGS, indent=1)); os.replace(tmp, SETTINGS_F)
 
@@ -73,6 +75,16 @@ if os.environ.get("DARKROOM_KEY", "").strip():
     SETTINGS["key"] = os.environ["DARKROOM_KEY"].strip()
 if os.environ.get("DARKROOM_LIBRARY") and APP:
     SETTINGS["library"] = os.environ["DARKROOM_LIBRARY"]
+# Camera login. New installs get a private password (anyone on the same Wi-Fi could otherwise log in);
+# installs from before 1.1 keep the old default so a camera that's already set up keeps working.
+if "ftp_pass" not in SETTINGS:
+    import secrets
+    legacy = bool(_SAVED_BEFORE.get("key") or _SAVED_BEFORE.get("folders"))
+    SETTINGS["ftp_user"] = "sony" if legacy else "darkroom"
+    SETTINGS["ftp_pass"] = "darkroom" if legacy else "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(8))
+    save_settings()
+FTP_USER = os.environ.get("DARKROOM_FTP_USER") or SETTINGS["ftp_user"]
+FTP_PASS = os.environ.get("DARKROOM_FTP_PASS") or SETTINGS["ftp_pass"]
 ROOT = Path(SETTINGS.get("library") or (Path.home() / "Pictures/Darkroom" if APP else STATE)).expanduser()
 ROOT.mkdir(parents=True, exist_ok=True)
 INBOX, CACHE = STATE / "inbox", STATE / ".cache"
@@ -80,7 +92,7 @@ for d in (INBOX, CACHE):
     d.mkdir(parents=True, exist_ok=True)
 INBOX = INBOX.resolve()  # the FTP server reports real paths (macOS: /var -> /private/var)
 
-STATUS = {"online": None, "last_camera": None, "last_file": None, "ftp_error": None}
+STATUS = {"online": None, "last_camera": None, "last_file": None, "ftp_error": None, "port2": None, "login_failed": None}
 
 # ---------------------------------------------------------------- local state
 lock = threading.Lock()
@@ -114,17 +126,38 @@ def shoot_dir(key):
     return ROOT / folders[key]
 
 # ---------------------------------------------------------------- image analysis
+def embedded_jpeg(path: Path) -> Image.Image:
+    """Largest JPEG preview embedded in a RAW file. Every major RAW format carries one, so this works
+    for brand-new camera models before the RAW library knows them."""
+    data = path.read_bytes()
+    best, best_area, i, tries = None, 0, 0, 0
+    while tries < 80:
+        i = data.find(b"\xff\xd8\xff", i)
+        if i < 0: break
+        tries += 1
+        try:
+            im = Image.open(io.BytesIO(data[i:]))
+            if im.format == "JPEG" and im.width * im.height > best_area:
+                best, best_area = i, im.width * im.height
+        except Exception:
+            pass
+        i += 3
+    if best is None:
+        raise ValueError("no preview inside this RAW file")
+    im = Image.open(io.BytesIO(data[best:])); im.load()
+    return ImageOps.exif_transpose(im)
+
 def load_image(path: Path) -> Image.Image:
     if path.suffix.lower() in RAW_EXT:
-        import rawpy
-        with rawpy.imread(str(path)) as raw:
-            try:
+        try:
+            import rawpy
+            with rawpy.imread(str(path)) as raw:
                 t = raw.extract_thumb()
                 if t.format == rawpy.ThumbFormat.JPEG:
                     return ImageOps.exif_transpose(Image.open(io.BytesIO(t.data)))
                 return Image.fromarray(t.data)
-            except Exception:
-                return Image.fromarray(raw.postprocess(half_size=True, use_camera_wb=True))
+        except Exception:
+            return embedded_jpeg(path)
     if path.suffix.lower() in {".heif", ".hif", ".heic"}:
         try:
             import pillow_heif; pillow_heif.register_heif_opener()
@@ -234,19 +267,20 @@ def file_in(path: Path, key: str):
     if not key:
         return  # no shoot connected: it waits in the inbox and is assigned when one is
     path = path.resolve()
+    if not path.is_file():
+        return  # renamed or removed by the camera meanwhile; the rename is handled separately
     try:
-        rel = path.relative_to(INBOX)
+        rel = path.relative_to(INBOX)        # arrived with no shoot connected: file it now
     except ValueError:
-        rel = Path(path.name)
+        return ingest(path, key)              # already in the shoot folder (or a hot folder): leave it there
     dest = shoot_dir(key) / rel
-    if dest != path:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(path), str(dest))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), str(dest))
     ingest(dest, key)
 
 def ingest(path: Path, key: str):
     ext = path.suffix.lower()
-    if ext not in IMG_EXT | RAW_EXT or path.name.startswith("."):
+    if ext not in IMG_EXT | RAW_EXT or path.name.startswith(".") or path.name.lower().endswith(TEMP_SUFFIXES):
         return
     stem = path.stem
     existing = q("SELECT * FROM photos WHERE shoot=? AND name LIKE ?", key, stem + ".%")
@@ -300,9 +334,40 @@ def queue_waiting():
             jobs.put((p, key_now()))
     wake.set()
 
+class ShootAuthorizer(DummyAuthorizer):
+    """The camera's FTP folder IS the connected shoot's folder, so files land where they belong and
+    are never moved while the camera may still rename or check them."""
+    def get_home_dir(self, username):
+        key = key_now()
+        d = (shoot_dir(key) if key else INBOX).resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
 class CameraHandler(FTPHandler):
-    def on_login(self, username): STATUS["last_camera"] = time.time()
-    def on_file_received(self, file): STATUS["last_camera"] = time.time(); jobs.put((Path(file), key_now()))
+    shoot_key = ""
+    def on_login(self, username):
+        STATUS["last_camera"] = time.time()
+        root = Path(self.fs.root).resolve()
+        self.shoot_key = key_now() if key_now() and root == shoot_dir(key_now()).resolve() else ""
+    def pre_process_command(self, line, cmd, arg):
+        # Cameras keep one connection open for hours. If the photographer switches shoots meanwhile,
+        # point this open connection at the new shoot's folder before the next command runs.
+        if self.authenticated and self.shoot_key != key_now():
+            home, cwd = self.authorizer.get_home_dir(self.username), self.fs.cwd
+            self.fs = self.abstracted_fs(home, self)
+            if cwd not in ("", "/"):  # a camera that cd'ed into e.g. DCIM/100CANON keeps the same place
+                os.makedirs(self.fs.ftp2fs(cwd), exist_ok=True); self.fs.cwd = cwd
+            self.shoot_key = key_now()
+        return super().pre_process_command(line, cmd, arg)
+    def on_login_failed(self, username, password):
+        STATUS["login_failed"] = time.time()
+    def on_file_received(self, file):
+        STATUS["last_camera"] = time.time()
+        if self.shoot_key: jobs.put((Path(file), self.shoot_key))
+    def ftp_RNTO(self, path):  # cameras that upload "name.tmp" then rename it
+        out = super().ftp_RNTO(path)
+        if self.shoot_key and os.path.isfile(path): jobs.put((Path(path), self.shoot_key))
+        return out
     def on_incomplete_file_received(self, file):
         try: os.remove(file)
         except OSError: pass
@@ -315,14 +380,54 @@ def run_ftp():
         print("  !", STATUS["ftp_error"], e)
 
 def _run_ftp():
-    auth = DummyAuthorizer()
+    from pyftpdlib.ioloop import IOLoop
+    auth = ShootAuthorizer()
     auth.add_user(FTP_USER, FTP_PASS, str(INBOX), perm="elradfmwMT")
     CameraHandler.authorizer = auth
     CameraHandler.passive_ports = range(60000, 60100)
     CameraHandler.banner = "darkroom ready"
+    CameraHandler.auth_failed_timeout = 2
+    if FTP_PORT2 and FTP_PORT2 != FTP_PORT:
+        try:  # best effort: macOS lets apps use port 21; elsewhere it may be taken or need admin rights
+            srv2 = FTPServer(("0.0.0.0", FTP_PORT2), CameraHandler, ioloop=IOLoop())
+            srv2.max_cons = 32
+            threading.Thread(target=srv2.serve_forever, kwargs={"handle_exit": False}, daemon=True).start()
+            STATUS["port2"] = FTP_PORT2
+        except OSError:
+            STATUS["port2"] = None
     srv = FTPServer(("0.0.0.0", FTP_PORT), CameraHandler)
     srv.max_cons = 32
     srv.serve_forever(handle_exit=False)
+
+def hot_folder_loop():
+    """Ingests new photos that appear in a folder (where a tethering app saves: Capture One, Phocus,
+    Lumix Tether, EOS Utility...). Files already there when watching starts are left alone."""
+    seen, pending, watched = set(), {}, None
+    while True:
+        time.sleep(2)
+        hf = SETTINGS.get("hot_folder")
+        if not hf:
+            watched = None; continue
+        d = Path(hf)
+        if not d.is_dir():
+            continue
+        try:
+            files = [p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXT | RAW_EXT]
+        except OSError:
+            continue
+        if watched != hf:  # new folder: everything already in it is the baseline
+            watched, seen, pending = hf, {str(p) for p in files}, {}
+            continue
+        for p in files:
+            sp = str(p)
+            if sp in seen: continue
+            try: st = p.stat()
+            except OSError: continue
+            sig = (st.st_size, st.st_mtime)
+            if pending.get(sp) == sig and time.time() - st.st_mtime > 1 and key_now():  # stopped growing
+                seen.add(sp); pending.pop(sp, None); jobs.put((p, key_now())); STATUS["last_camera"] = time.time()
+            else:
+                pending[sp] = sig
 
 def connect(key):
     """Switch to a shoot. Online: the key is checked. Offline: accepted, checked on first upload."""
@@ -401,10 +506,13 @@ def panel_html(msg=""):
 {f'<div class="card wide warn">{parked} photo{"s" if parked != 1 else ""} (e.g. {html.escape(parked_name)}) couldn\'t upload because {"their shoot was" if parked != 1 else "its shoot was"} deleted on Darkroom. The originals are safe in your folder.</div>' if parked else ''}
 <div class=card><div class=lab>Shoot</div>{shoot}
 <form method=post action=/key class=row><input name=key placeholder="Shoot key" autocomplete=off><button class=p>Connect</button></form></div>
-<div class=card><div class=lab>Camera → Network → FTP Transfer Func. → Server 1</div>
-<div class=kv style="margin-top:8px"><span>Host</span><b>{ip}</b><span>Port</span><b>{FTP_PORT}</b><span>User</span><b>{FTP_USER}</b>
-<span>Password</span><b>{FTP_PASS}</b><span>Passive</span><b>On</b><span>Secure</span><b>Off</b></div>
-<p class=muted>Then FTP Function <b>On</b> · Auto FTP Transfer <b>On</b> · Transfer Target <b>JPEG</b>. Camera last seen: <b>{ago(STATUS["last_camera"])}</b></p>
+<div class=card><div class=lab>Enter this in your camera's FTP server settings</div>
+<div class=kv style="margin-top:8px"><span>Server / Host</span><b>{ip}</b><span>Port</span><b>{FTP_PORT}{f" (or {STATUS['port2']})" if STATUS["port2"] else ""}</b>
+<span>Server type</span><b>FTP</b><span>User</span><b>{html.escape(FTP_USER)}</b><span>Password</span><b>{html.escape(FTP_PASS)}</b>
+<span>Passive mode</span><b>On</b><span>Secure / FTPS</span><b>Off</b><span>Folder</span><b>leave empty</b></div>
+<p class=muted>Turn on automatic transfer and send <b>JPEG</b> (or HEIF). Camera last seen: <b>{ago(STATUS["last_camera"])}</b></p>
+{'<div class=warn>A camera just tried the wrong user name or password. Check the two fields above.</div>' if STATUS["login_failed"] and time.time() - STATUS["login_failed"] < 120 else ''}
+{'<div class=warn>Your camera password is the old shared default. <form method=post action=/newpass style="display:inline"><button>Make a private password</button></form> then enter it in the camera.</div>' if FTP_PASS == "darkroom" and not os.environ.get("DARKROOM_FTP_PASS") else ''}
 {'<div class=warn>This Mac has no usable Wi-Fi address. Join a normal Wi-Fi network (not a phone hotspot or guest Wi-Fi) with the camera.</div>' if bad_net else ''}</div>
 <div class="card wide"><div class=lab>This shoot</div><div class=stats style="margin-top:6px">
 <div>{len(rows)} photo{"" if len(rows) == 1 else "s"}<span>received</span></div><div>{up}<span>developed in Darkroom</span></div>
@@ -413,6 +521,10 @@ def panel_html(msg=""):
 <div class="card wide"><div class=lab>Originals saved in</div>
 <form method=post action=/library class=row><input name=path value="{html.escape(str(ROOT))}"><button>Change</button></form>
 <div class=row><form method=post action=/reveal><button>Show in Finder</button></form><a href=/log style="margin:auto 0;color:#888">Log</a></div></div>
+<div class="card wide"><div class=lab>Camera without Wi-Fi FTP? Use a hot folder</div>
+<p class=muted>Shooting tethered with Capture One, Phocus, Lumix Tether, EOS Utility or similar? Point that app at a folder and enter it here. New photos that appear in it develop in the connected shoot.</p>
+<form method=post action=/hotfolder class=row><input name=path placeholder="e.g. ~/Pictures/Tethered" value="{html.escape(SETTINGS.get('hot_folder') or '')}"><button>{'Change' if SETTINGS.get('hot_folder') else 'Watch'}</button></form>
+{'<form method=post action=/hotfolder class=row><input type=hidden name=path value=""><button>Stop watching</button></form>' if SETTINGS.get('hot_folder') else ''}</div>
 </main>
 <script>setInterval(async()=>{{if(document.activeElement&&document.activeElement.tagName==='INPUT')return;
 try{{const t=await (await fetch('/',{{cache:'no-store'}})).text();const d=new DOMParser().parseFromString(t,'text/html');
@@ -475,7 +587,7 @@ class Local(BaseHTTPRequestHandler):
             return self.send(200, panel_html(qs.get("m", [""])[0]))
         self.send(404, "not found", "text/plain")
     def do_POST(self):
-        global ROOT
+        global ROOT, FTP_PASS
         if not (self.host_ok() and self.same_origin()):
             return self.send(403, "Blocked: requests must come from the bridge's own page.", "text/plain")
         n = int(self.headers.get("Content-Length") or 0)
@@ -491,6 +603,21 @@ class Local(BaseHTTPRequestHandler):
                 return self.back(f"Can't save there ({e.__class__.__name__}). Is the drive plugged in?")
             ROOT = p; SETTINGS["library"] = str(p); SETTINGS.pop("folders", None); save_settings()
             return self.back(f"New photos will be saved in {p}")
+        if self.path == "/hotfolder":
+            p = form.get("path", "").strip()
+            if not p:
+                SETTINGS.pop("hot_folder", None); save_settings(); return self.back("Stopped watching the hot folder.")
+            d = Path(p).expanduser()
+            if not d.is_dir():
+                return self.back(f"There's no folder at {d}.")
+            SETTINGS["hot_folder"] = str(d.resolve()); save_settings()
+            return self.back(f"Watching {d}. New photos that appear there go to the connected shoot.")
+        if self.path == "/newpass":
+            import secrets
+            FTP_PASS = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(8))
+            SETTINGS["ftp_pass"] = FTP_PASS; save_settings()
+            CameraHandler.authorizer.user_table[FTP_USER]["pwd"] = FTP_PASS
+            return self.back("New camera password set. Enter it in your camera's FTP settings.")
         if self.path == "/reveal":
             d = shoot_dir(key_now()) if key_now() else ROOT
             d.mkdir(parents=True, exist_ok=True)
@@ -547,6 +674,7 @@ def main():
     except OSError as e:
         print(f"  ! Port {WEB_PORT} is used by another program ({e}). Quit it and open Darkroom Bridge again."); return
     threading.Thread(target=run_ftp, daemon=True).start()
+    threading.Thread(target=hot_folder_loop, daemon=True).start()
     queue_waiting()
     ip, key = local_ip(), key_now()
     print(f"\n  ◉ Darkroom bridge v{VERSION}")
