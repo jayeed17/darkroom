@@ -29,7 +29,7 @@ def jpeg(img, model="ILCE-7M4", dt="2026:11:19 10:00:00"):
 lib = Path(tempfile.mkdtemp(prefix=f"dr{ROUND}_", dir=os.environ.get("TEST_TMP")))
 KEY = "testkey" + ROUND * 17
 KID = KEY[:10]
-env = {**os.environ, "DARKROOM_LIBRARY": str(lib), "DARKROOM_KEY": "testkey" + ROUND * 17,
+env = {**os.environ, "DARKROOM_API": "http://127.0.0.1:9", "DARKROOM_LIBRARY": str(lib), "DARKROOM_KEY": "testkey" + ROUND * 17,
        "DARKROOM_FTP_PORT": str(FTP_PORT), "DARKROOM_WEB_PORT": str(WEB_PORT), "PYTHONUNBUFFERED": "1"}
 def start():
     p = subprocess.Popen([sys.executable, str(BRIDGE)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
